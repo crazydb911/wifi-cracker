@@ -63,21 +63,28 @@ def scan_wifi(duration=10):
         time.sleep(duration)
         p.terminate()
         p.wait()
-        # Parse beacons
+        # Parse beacons (dedupe by BSSID+SSID, keep best RSSI)
         r = subprocess.run(
-            [TSHARK, "-r", cap_file, "-Y", "wlan.mgt", "-T", "fields",
-             "-e", "wlan.sa", "-e", "_ws.col.essid", "-e", "wlan.channel", "-e", "wlan.signal"],
+            [TSHARK, "-r", cap_file, "-Y", "wlan.mgt && wlan.ssid", "-T", "fields",
+             "-e", "wlan.sa", "-e", "wlan.ssid", "-e", "wlan.channel", "-e", "wlan.signal"],
             capture_output=True, text=True, timeout=30)
-        ap_list, seen = [], set()
+        ap_map = {}  # bssid -> {ssid, channel, rssi}
         for line in r.stdout.strip().splitlines():
             parts = line.split('\t')
             if len(parts) >= 4:
-                bssid, ssid, ch, sig = parts[0], parts[1] or "(hidden)", parts[2], parts[3]
-                if bssid and bssid not in seen and ssid != "":
-                    seen.add(bssid)
-                    ap_list.append({"bssid": bssid, "ssid": ssid, "channel": ch,
-                                    "rssi": int(sig) if sig.lstrip('-').isdigit() else 0,
-                                    "security": "WPA2", "mode": "802.11"})
+                bssid, ssid, ch, sig = parts[0], parts[1], parts[2], parts[3]
+                if not bssid or bssid == "00:00:00:00:00:00":
+                    continue
+                rssi = int(sig) if sig.lstrip('-').isdigit() else 0
+                # Keep best RSSI for each BSSID
+                if bssid in ap_map:
+                    if rssi > ap_map[bssid]["rssi"]:
+                        ap_map[bssid]["rssi"] = rssi
+                        ap_map[bssid]["channel"] = ch
+                else:
+                    ap_map[bssid] = {"bssid": bssid, "ssid": ssid, "channel": ch,
+                                     "rssi": rssi, "security": "WPA2", "mode": "802.11"}
+        ap_list = list(ap_map.values())
         ap_list.sort(key=lambda x: x["rssi"], reverse=True)
         STATE["ap_list"] = ap_list
         STATE["status"] = "idle"
@@ -99,10 +106,10 @@ def start_capture(bssid, ssid, duration=60):
     log(f"Capture {ssid} {duration}s -> {STATE['capture_file']}")
     try:
         cap_file = STATE["capture_file"]
+        # Capture ALL 802.11 frames (don't filter - EAPOL filter was unreliable)
         p = subprocess.Popen(
             ["sudo", "-S", TSHARK, "-i", "en0", "-I", "-y", "IEEE802_11",
-             "-f", f"wlan.sa == {bssid} || wlan.da == {bssid} || eapol",
-             "-c", "1000", "-w", cap_file],
+             "-c", "2000", "-w", cap_file],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
         p.stdin.write(SUDO_PASS + "\n")
@@ -110,12 +117,20 @@ def start_capture(bssid, ssid, duration=60):
         time.sleep(duration)
         p.terminate()
         p.wait()
+        # Count EAPOL frames
+        r = subprocess.run(
+            [TSHARK, "-r", cap_file, "-Y", "eapol", "-T", "fields", "-e", "frame.number"],
+            capture_output=True, text=True, timeout=15)
+        eapol_count = len(r.stdout.strip().splitlines())
         STATE["capture_duration"] = duration
+        STATE["capture_eapol_count"] = eapol_count
         STATE["status"] = "idle"
         STATE["capturing"] = False
-        STATE["message"] = f"Capture done: {cap_file}"
+        STATE["message"] = f"Capture done: {cap_file} ({eapol_count} EAPOL frames)"
         STATE["progress"] = 50
-        log(f"Capture saved: {cap_file}")
+        log(f"Capture saved: {cap_file} ({eapol_count} EAPOL frames)")
+        if eapol_count == 0:
+            log("⚠️ No EAPOL frames captured - try reconnecting WiFi during capture")
     except Exception as e:
         STATE["status"] = "idle"
         STATE["capturing"] = False

