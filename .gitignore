@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Uploads
+uploads/
+
+# Hashes
+hashes/
+
+# Logs
+*.log
+
+# PID files
+*.pid
+
+# Large captures
+*.pcap
+*.pcapng
+!32h9f_eapol.pcapng
+
+# Wordlists (too large for git)
+wordlists/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
