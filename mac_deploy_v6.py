@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Deploy Mac WiFi Cracker v6 to Mac via SSH."""
-import paramiko, time, sys
+import paramiko, time
 
 HOST = "192.168.1.102"
 USER = "crazydb911"
@@ -16,15 +16,10 @@ def main():
     client.connect(HOST, port=22, username=USER, pkey=key, timeout=10)
     print("Connected!")
     
-    # Check if Mac WiFi is on
+    # Check WiFi
     stdin, stdout, stderr = client.exec_command("networksetup -getairportpower en0")
     result = stdout.read().decode().strip()
     print(f"WiFi power: {result}")
-    
-    if result != "Wi-Fi Power On":
-        print("WiFi is OFF, turning on...")
-        client.exec_command("sudo -S networksetup -setairportpower en0 on", stdin=True)
-        time.sleep(5)
     
     # Kill old app
     print("Killing old app...")
@@ -39,7 +34,7 @@ def main():
     
     # Create start script
     print("Creating start script...")
-    start_script = f"""#!/bin/bash
+    start_script = """#!/bin/bash
 cd /Users/crazydb911
 nohup python3 wifi_cracker_v6.py > wifi_cracker_v6.log 2>&1 &
 echo $! > wifi_cracker_v6.pid
@@ -54,16 +49,18 @@ echo "Started PID $(cat wifi_cracker_v6.pid)"
     # Start app
     print("Starting app...")
     stdin, stdout, stderr = client.exec_command("bash /Users/crazydb911/start_v6.sh")
-    print(stdout.read().decode().strip())
+    out = stdout.read().decode().strip()
+    print(out)
     
     time.sleep(3)
     
-    # Check if it's running
-    stdin, stdout, stderr = client.exec_command("cat /Users/crazydb911/wifi_cracker_v6.log | head -5")
-    print(f"Log: {stdout.read().decode().strip()}")
+    # Check log
+    stdin, stdout, stderr = client.exec_command("cat /Users/crazydb911/wifi_cracker_v6.log 2>/dev/null | head -10")
+    log = stdout.read().decode().strip()
+    print(f"Log: {log}")
     
     client.close()
-    print(f"\n✅ Mac app deployed! Visit http://{HOST}:8765")
+    print(f"\nMac app deployed! Visit http://{HOST}:8765")
 
 if __name__ == "__main__":
     main()

