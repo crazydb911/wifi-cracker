@@ -17,6 +17,8 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 WINDOWS_URL = "http://192.168.1.107:8766"
 TSHARK = "/usr/local/bin/tshark"
 SUDO_PASS = " "  # space
+LOG_FILE = f"/tmp/wifi_cracker_{time.strftime('%Y%m%d')}.log"
+LOG_LOCK = threading.Lock()
 
 STATE = {
     "status": "idle",
@@ -34,12 +36,20 @@ STATE = {
 }
 
 def log(msg):
-    ts = time.strftime("%H:%M:%S")
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
     entry = f"[{ts}] {msg}"
+    # In-memory (for API/UI)
     STATE["log"].append(entry)
     print(entry, flush=True)
     if len(STATE["log"]) > 800:
         STATE["log"] = STATE["log"][-800:]
+    # File (for debugging/optimization)
+    with LOG_LOCK:
+        try:
+            with open(LOG_FILE, 'a') as f:
+                f.write(entry + '\n')
+        except:
+            pass
 
 def run_sudo(cmd, timeout=10):
     """Run command with sudo (space password)."""
@@ -63,11 +73,13 @@ def scan_wifi(duration=10):
         time.sleep(duration)
         p.terminate()
         p.wait()
-        # Parse beacons (dedupe by BSSID+SSID, keep best RSSI)
+        log(f"Scan capture: {cap_file} ({p.returncode})")
+        # Parse beacons (dedupe by BSSID, keep best RSSI)
         r = subprocess.run(
             [TSHARK, "-r", cap_file, "-Y", "wlan.mgt && wlan.ssid", "-T", "fields",
              "-e", "wlan.sa", "-e", "wlan.ssid", "-e", "wlan.channel", "-e", "wlan.signal"],
             capture_output=True, text=True, timeout=30)
+        log(f"Scan parse: {len(r.stdout.strip().splitlines())} beacon lines")
         ap_map = {}  # bssid -> {ssid, channel, rssi}
         for line in r.stdout.strip().splitlines():
             parts = line.split('\t')
@@ -76,7 +88,6 @@ def scan_wifi(duration=10):
                 if not bssid or bssid == "00:00:00:00:00:00":
                     continue
                 rssi = int(sig) if sig.lstrip('-').isdigit() else 0
-                # Keep best RSSI for each BSSID
                 if bssid in ap_map:
                     if rssi > ap_map[bssid]["rssi"]:
                         ap_map[bssid]["rssi"] = rssi

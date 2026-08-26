@@ -26,12 +26,18 @@ WORDLISTS = {
 }
 POTFILE = r"C:\Users\crazydb911\Documents\deepseek\hashes\test_pot"
 UPLOAD_DIR = r"C:\Users\crazydb911\Documents\deepseek\uploads"
+LOG_DIR = r"C:\Users\crazydb911\Documents\deepseek\logs"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
 
 # Thermal management
 TEMP_LIMIT = 85       # normal throttle
 TEMP_CRIT = 92        # critical abort
 TEMP_COOLDOWN = 10    # seconds to wait when throttling
+
+# Log file (rolling by date)
+LOG_FILE = os.path.join(LOG_DIR, f"cracker_{datetime.now().strftime('%Y%m%d')}.log")
+LOG_LOCK = threading.Lock()
 
 STATE = {
     "status": "idle",
@@ -50,12 +56,20 @@ STATE = {
 }
 
 def log(msg):
-    ts = datetime.now().strftime("%H:%M:%S")
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     entry = f"[{ts}] {msg}"
+    # In-memory (for API/UI)
     STATE["log"].append(entry)
     print(entry, flush=True)
     if len(STATE["log"]) > 800:
         STATE["log"] = STATE["log"][-800:]
+    # File (for debugging/optimization)
+    with LOG_LOCK:
+        try:
+            with open(LOG_FILE, 'a', encoding='utf-8') as f:
+                f.write(entry + '\n')
+        except:
+            pass
 
 def get_gpu_status():
     try:
@@ -145,6 +159,7 @@ def extract_hashes(pcap_path, ssid, ap_mac_hint=None):
         ssid_hex = ssid.encode('utf-8').hex()
         hashes = []
         pairs = 0
+        nonce_issues = 0
         for rsc, group in sorted(rsc_groups.items()):
             m1 = [f for f in group if f['msg_num'] == 1]
             m3 = [f for f in group if f['msg_num'] == 3]
@@ -152,31 +167,34 @@ def extract_hashes(pcap_path, ssid, ap_mac_hint=None):
                 continue
             pairs += 1
             m1f, m3f = m1[0], m3[0]
-            # AP MAC: dst of M1 (or use hint)
             ap_mac = m1f['dst_mac'] or ap_mac_detected or '6c4f894ca0e4'
-            sta_mac = m1f['src_mac']  # STA sends M1
-            anonce = m1f['nonce']     # ANonce from M1
-            key_mic = m3f['mic']      # MIC from M3 (16 bytes)
-            ek_raw = m3f['raw']       # Full EAPOL frame from M3
+            sta_mac = m1f['src_mac']
+            anonce = m1f['nonce']
+            key_mic = m3f['mic']
+            ek_raw = m3f['raw']
             eapol_len = len(ek_raw)
-            # Build full EAPOL frame: version(1) + type(1) + length(2) + EAPOL_KEY
             full_frame = bytes([1, 0x03]) + eapol_len.to_bytes(2, 'big') + ek_raw
             eapol_hex = full_frame.hex()
             hash_str = f"WPA*02*{key_mic}*{ap_mac}*{sta_mac}*{ssid_hex}*{anonce}*{eapol_hex}*03"
             hashes.append(hash_str)
-            # Verify nonces
-            if m1f['nonce'] == m3f['nonce']:
-                log(f"  ⚠️ RSC {rsc}: ANonce == SNonce (truncated?)")
+            # Log details for debugging
+            nonce_match = "SAME" if m1f['nonce'] == m3f['nonce'] else "DIFF"
+            if nonce_match == "SAME":
+                nonce_issues += 1
+            # Check for truncated nonce (trailing zeros)
+            nonce_trunc = "TRUNCATED" if anonce[-20:] == '0' * 20 else "OK"
+            log(f"  [{pairs}] RSC={rsc} AP={ap_mac} STA={sta_mac} nonce={nonce_match}/{nonce_trunc}")
         
-        log(f"M1+M3 pairs: {pairs}")
+        log(f"M1+M3 pairs: {pairs}, nonce issues: {nonce_issues}")
         hash_file = str(Path(pcap_path).with_suffix('.hc22000'))
         with open(hash_file, 'w') as f:
             f.write('\n'.join(hashes) + '\n')
         STATE["hash_file"] = hash_file
         STATE["hash_count"] = len(hashes)
         STATE["ssid"] = ssid
+        STATE["nonce_issues"] = nonce_issues
         STATE["status"] = "idle"
-        STATE["message"] = f"Extracted {len(hashes)} hashes ({pairs} pairs)"
+        STATE["message"] = f"Extracted {len(hashes)} hashes ({pairs} pairs, {nonce_issues} nonce issues)"
         STATE["progress"] = 50
         log(f"Extracted {len(hashes)} hashes -> {hash_file}")
     except Exception as e:
@@ -213,12 +231,11 @@ def crack_hashes(hash_file, wordlist_key, rules_key=None, mode="0", mask=None):
             # Mask attack: mask only (alias for 1)
             cmd.extend(["-a", "3", hash_file, mask or "?d?d?d?d?d?d?d?d"])
         log(f"CMD: {' '.join(cmd)}")
-        # Remove --quiet to see progress
-        if "--quiet" in cmd:
-            cmd.remove("--quiet")
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=HASHCAT_DIR)
         start_time = time.time()
         last_log = 0
+        speed_lines = []
+        status_lines = []
         for line in proc.stdout:
             line = line.strip()
             if not line:
@@ -228,18 +245,36 @@ def crack_hashes(hash_file, wordlist_key, rules_key=None, mode="0", mask=None):
             if now - last_log > 15:
                 last_log = now
                 elapsed = int(now - start_time)
-                STATE["message"] = f"Cracking... ({elapsed}s) {line[:100]}"
+                STATE["message"] = f"Cracking... ({elapsed}s)"
                 log(f"[{elapsed}s] {line[:150]}")
-            # Check for results
+            # Collect metrics
             if re.match(r'^[0-9a-f]{64}:', line):
                 STATE["results"].append(line)
                 log(f"CRACKED: {line}")
-            if 'Speed' in line and 'MH/s' in line:
+            if 'Speed' in line and ('MH/s' in line or 'kH/s' in line):
+                speed_lines.append(line)
                 STATE["speed"] = line
             if 'Status' in line:
-                log(line)
+                status_lines.append(line)
+                log(f"STATUS: {line}")
+            if 'Progress' in line:
+                log(f"PROGRESS: {line}")
+            if 'Rejected' in line:
+                log(f"REJECTED: {line}")
         proc.wait()
         elapsed = int(time.time() - start_time)
+        # Save full hashcat output to file
+        hc_log = os.path.join(LOG_DIR, f"hashcat_{int(start_time)}.log")
+        with open(hc_log, 'w', encoding='utf-8') as f:
+            f.write(f"Command: {' '.join(cmd)}\n")
+            f.write(f"Start: {datetime.fromtimestamp(start_time).strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Elapsed: {elapsed}s\n")
+            f.write(f"Results: {STATE['results']}\n")
+            f.write(f"Speed (last): {STATE['speed']}\n")
+            f.write(f"\nStatus lines:\n")
+            for s in status_lines:
+                f.write(s + '\n')
+        log(f"Hashcat log: {hc_log}")
         results = STATE["results"]
         if not results:
             results.append("No match")
