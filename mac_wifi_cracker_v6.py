@@ -3,7 +3,7 @@
 Mac WiFi Cracker v6 (port 8765) - Manual capture + one-click upload to Windows.
 Reference: hcxdumptool (capture) + hcxpcapngtool (convert) + hashcat (crack)
 """
-import os, sys, json, subprocess, threading, time, re
+import os, sys, json, subprocess, threading, time, re, shlex
 from pathlib import Path
 import requests
 from fastapi import FastAPI, UploadFile, File, Request
@@ -35,6 +35,13 @@ STATE = {
     "win_status": None,
     "win_results": [],
     "log": [],
+}
+
+# Control state (for remote command execution)
+CONTROL_STATE = {
+    "cmds": [],
+    "last_output": None,
+    "running": False,
 }
 
 def log(msg):
@@ -84,6 +91,7 @@ def scan_wifi(duration=10):
                       input=(SUDO_PASS + "\n").encode(), capture_output=True, timeout=10)
         cap_file = home_cap
         # Parse beacons (SSID is hex-encoded in wlan.ssid field)
+        # Use simpler filter to avoid missing frames
         r = subprocess.run(
             [TSHARK, "-r", cap_file, "-Y", "wlan", "-T", "fields",
              "-e", "wlan.sa", "-e", "wlan.ssid"],
@@ -134,17 +142,33 @@ def start_capture(bssid, ssid, duration=60):
         )
         p.stdin.write((SUDO_PASS + "\n").encode())
         p.stdin.flush()
-        # After 5s, toggle WiFi to force re-auth (EAPOL handshake)
-        # Use networksetup (gentler, doesn't kill tshark)
+        
+        # Improved toggle: airport -z (deauth) + setairportnetwork (reconnect)
+        # This forces EAPOL handshake on the SAME BSSID
         def toggle_wifi():
             time.sleep(5)
-            log("Toggling WiFi: setairportpower off")
-            subprocess.run(["networksetup", "-setairportpower", "en0", "off"],
-                          capture_output=True, timeout=10)
-            time.sleep(5)
-            log("Toggling WiFi: setairportpower on")
-            subprocess.run(["networksetup", "-setairportpower", "en0", "on"],
-                          capture_output=True, timeout=10)
+            log("Toggling WiFi: airport -z (deauth)")
+            AIRPORT = "/System/Library/PrivateFrameworks/Apple80211.framework/Resources/airport"
+            subprocess.run(["sudo", "-S", AIRPORT, "en0", "-z"],
+                          input=(SUDO_PASS + "\n").encode(), capture_output=True, timeout=10)
+            time.sleep(3)
+            log("Toggling WiFi: setairportnetwork (reconnect)")
+            subprocess.run(["networksetup", "-setairportnetwork", "en0", ssid],
+                          capture_output=True, timeout=30)
+            time.sleep(10)
+            # Check if connected
+            r = subprocess.run(["networksetup", "-getairportnetwork", "en0"],
+                             capture_output=True, text=True, timeout=10)
+            connected = ssid in r.stdout
+            log(f"Connected: {connected} ({r.stdout.strip()})")
+            if not connected:
+                # Fallback: power off/on
+                log("Fallback: setairportpower off/on")
+                subprocess.run(["networksetup", "-setairportpower", "en0", "off"],
+                              capture_output=True, timeout=10)
+                time.sleep(5)
+                subprocess.run(["networksetup", "-setairportpower", "en0", "on"],
+                              capture_output=True, timeout=10)
         t = threading.Thread(target=toggle_wifi, daemon=True)
         t.start()
         time.sleep(duration)
@@ -163,15 +187,22 @@ def start_capture(bssid, ssid, duration=60):
             [TSHARK, "-r", cap_file, "-Y", "eapol", "-T", "fields", "-e", "frame.number"],
             capture_output=True, text=True, timeout=15)
         eapol_count = len(r.stdout.strip().splitlines())
+        # Count EAPOL from target BSSID
+        r2 = subprocess.run(
+            [TSHARK, "-r", cap_file, "-Y", f"eapol && (wlan.sa == {bssid} || wlan.da == {bssid})",
+             "-T", "fields", "-e", "frame.number"],
+            capture_output=True, text=True, timeout=15)
+        eapol_target = len(r2.stdout.strip().splitlines())
         STATE["capture_duration"] = duration
         STATE["capture_eapol_count"] = eapol_count
+        STATE["capture_eapol_target"] = eapol_target
         STATE["status"] = "idle"
         STATE["capturing"] = False
-        STATE["message"] = f"Capture done: {cap_file} ({eapol_count} EAPOL frames)"
+        STATE["message"] = f"Capture done: {cap_file} ({eapol_count} EAPOL, {eapol_target} target)"
         STATE["progress"] = 50
-        log(f"Capture saved: {cap_file} ({eapol_count} EAPOL frames)")
-        if eapol_count == 0:
-            log("⚠️ No EAPOL frames captured - try reconnecting WiFi during capture")
+        log(f"Capture saved: {cap_file} ({eapol_count} EAPOL, {eapol_target} target)")
+        if eapol_target == 0:
+            log(f"⚠️ No EAPOL from {bssid} - try reconnecting WiFi during capture")
     except Exception as e:
         STATE["status"] = "idle"
         STATE["capturing"] = False
@@ -223,6 +254,35 @@ def poll_windows():
         STATE["win_speed"] = d.get("speed")
     except:
         STATE["win_status"] = "unreachable"
+
+# Control functions (for remote command execution)
+def run_control(cmd, timeout=30):
+    """Run a command on Mac (local execution, via bash)."""
+    try:
+        p = subprocess.run(
+            ["bash", "-c", cmd],
+            capture_output=True, text=True, timeout=timeout
+        )
+        output = p.stdout + p.stderr
+        return {"ok": True, "exit_code": p.returncode, "output": output}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": f"Timeout ({timeout}s)"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+def run_sudo_control(cmd, timeout=30):
+    """Run a command with sudo (via bash)."""
+    try:
+        p = subprocess.run(
+            ["bash", "-c", f"echo '{SUDO_PASS}' | sudo -S {cmd}"],
+            capture_output=True, text=True, timeout=timeout
+        )
+        output = p.stdout + p.stderr
+        return {"ok": True, "exit_code": p.returncode, "output": output}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": f"Timeout ({timeout}s)"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 @app.get("/")
 async def root():
@@ -324,6 +384,96 @@ async def api_upload():
     threading.Thread(target=upload_to_windows, daemon=True).start()
     return JSONResponse({"ok": True})
 
+# Control endpoints (remote command execution)
+@app.get("/api/control")
+async def api_control_status():
+    """Get control status."""
+    return JSONResponse({
+        "running": CONTROL_STATE["running"],
+        "last_output": CONTROL_STATE["last_output"],
+        "history": CONTROL_STATE["cmds"][-20:]
+    })
+
+@app.post("/api/control/run")
+async def api_control_run(cmd: str, sudo: bool = False, timeout: int = 30):
+    """Run a command on Mac."""
+    CONTROL_STATE["running"] = True
+    CONTROL_STATE["cmds"].append(f"$ {cmd}")
+    
+    if sudo:
+        result = run_sudo_control(cmd, timeout)
+    else:
+        result = run_control(cmd, timeout)
+    
+    CONTROL_STATE["last_output"] = result
+    CONTROL_STATE["running"] = False
+    
+    log(f"Control: {cmd} -> {result.get('exit_code', 'error')}")
+    return JSONResponse(result)
+
+@app.get("/api/control/files")
+async def api_control_files(path: str = "/Users/crazydb911"):
+    """List files."""
+    try:
+        result = run_control(f"ls -la {path}")
+        return JSONResponse(result)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)})
+
+@app.get("/api/control/tail")
+async def api_control_tail(file: str, lines: int = 20):
+    """Tail a file."""
+    try:
+        result = run_control(f"tail -{lines} {file}")
+        return JSONResponse(result)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)})
+
+def check_wifi_status():
+    """Check WiFi status (for auto-reconnect)."""
+    try:
+        r = subprocess.run(["networksetup", "-getairportnetwork", "en0"],
+                         capture_output=True, text=True, timeout=10)
+        return r.stdout.strip()
+    except:
+        return "unknown"
+
+def auto_reconnect():
+    """Auto-reconnect WiFi if disconnected."""
+    status = check_wifi_status()
+    if "not associated" in status.lower() or "unknown" in status:
+        log(f"WiFi disconnected ({status}), auto-reconnecting...")
+        # Try to reconnect to last known network
+        last_net = STATE.get("last_network", "32H9F_5G")
+        subprocess.run(["networksetup", "-setairportnetwork", "en0", last_net],
+                      capture_output=True, timeout=30)
+        time.sleep(10)
+        status = check_wifi_status()
+        log(f"Auto-reconnect: {status}")
+        if "32H9F" in status:
+            STATE["last_network"] = status.split(": ")[-1] if ": " in status else last_net
+
+@app.get("/api/wifi")
+async def api_wifi():
+    """Get WiFi status."""
+    return JSONResponse({"status": check_wifi_status()})
+
+@app.post("/api/wifi/reconnect")
+async def api_wifi_reconnect():
+    """Trigger auto-reconnect."""
+    threading.Thread(target=auto_reconnect, daemon=True).start()
+    return JSONResponse({"ok": True})
+
 if __name__ == "__main__":
     log("Mac WiFi Cracker v6 starting on port 8765...")
+    # Start auto-reconnect checker (every 30s)
+    def wifi_checker():
+        while True:
+            time.sleep(30)
+            try:
+                auto_reconnect()
+            except Exception as e:
+                log(f"WiFi checker error: {e}")
+    t = threading.Thread(target=wifi_checker, daemon=True)
+    t.start()
     uvicorn.run(app, host="0.0.0.0", port=8765)

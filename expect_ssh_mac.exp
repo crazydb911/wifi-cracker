@@ -1,0 +1,21 @@
+#!/usr/bin/expect -f
+# 設定 Mac SSH key
+set timeout 30
+set password $env(MAC_PASSWORD)
+
+spawn ssh -o StrictHostKeyChecking=no crazydb911@192.168.1.102 "mkdir -p ~/.ssh && echo 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDuecEMHgnHrIcoGGbhM5bP+5iSlVYnrk+7wVJHSg/eq opremote@DESKTOP-IL11VJ1' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && echo 'done'"
+
+expect {
+    -re "P\(assword\):" {
+        send "$password\r"
+    }
+    "done" {
+        # 成功
+    }
+    timeout {
+        exit 1
+    }
+}
+
+expect eof
+exit 0

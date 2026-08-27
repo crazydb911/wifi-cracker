@@ -139,8 +139,11 @@ def extract_hashes(pcap_path, ssid, ap_mac_hint=None):
             msg_num = (key_info >> 8) & 0x03
             rsc_raw = raw[13:17]
             rsc = rsc_raw.hex()
-            mic = ek.key_mic.hex() if hasattr(ek, 'key_mic') else ''
-            nonce = ek.key_nonce.hex() if hasattr(ek, 'key_nonce') else ''
+            # Manual parse (scapy fields unreliable)
+            key_mic = raw[5:13].hex()
+            key_data_len = int.from_bytes(raw[21:23], 'big')
+            key_data = raw[23:23+key_data_len]
+            nonce = key_data[:32].hex() if key_data_len >= 32 else ''
             dst_mac = '000000000000'
             src_mac = '000000000000'
             if pkt.haslayer(Ether):
@@ -152,7 +155,7 @@ def extract_hashes(pcap_path, ssid, ap_mac_hint=None):
                     ap_mac_detected = dst_mac
             rsc_groups[rsc].append({
                 'msg_num': msg_num, 'dst_mac': dst_mac, 'src_mac': src_mac,
-                'nonce': nonce, 'mic': mic, 'raw': raw
+                'nonce': nonce, 'mic': key_mic, 'raw': raw
             })
         
         log(f"RSC groups: {len(rsc_groups)}, AP MAC: {ap_mac_detected}")
@@ -161,9 +164,10 @@ def extract_hashes(pcap_path, ssid, ap_mac_hint=None):
         pairs = 0
         nonce_issues = 0
         for rsc, group in sorted(rsc_groups.items()):
-            m1 = [f for f in group if f['msg_num'] == 1]
+            m1 = [f for f in group if f['msg_num'] in (1, 0)]
             m3 = [f for f in group if f['msg_num'] == 3]
             if not (m1 and m3):
+                log(f"  [SKIP {rsc}] M1={len(m1)} M3={len(m3)} (need both)")
                 continue
             pairs += 1
             m1f, m3f = m1[0], m3[0]
@@ -341,7 +345,9 @@ select,input{background:#0f3460;color:#eee;border:none;padding:8px;border-radius
 <button onclick="crack()" id="btn-crack" disabled>Crack</button>
 <div class="results" id="results">No results yet</div>
 </div>
-<div class="card"><h2>Log</h2><div class="log" id="log"></div></div>
+<div class="card"><h2>Log (live)</h2><div class="log" id="log"></div></div>
+<div class="card"><h2>File Log</h2><button onclick="loadLog()" style="font-size:12px;padding:5px 10px">Refresh</button><div class="log" id="log-file" style="max-height:200px"></div></div>
+<div class="card"><h2>Uploaded PCAPs</h2><button onclick="listPcaps()" style="font-size:12px;padding:5px 10px">Refresh</button><div class="results" id="pcap-list" style="font-size:12px"></div></div>
 <script>
 function update(){fetch('/api/state').then(r=>r.json()).then(d=>{
 document.getElementById('status').textContent=d.status;
@@ -378,10 +384,12 @@ document.getElementById('btn-crack').disabled=true;
 fetch(`/api/crack?wordlist=${w}&rules=${r}&mode=${m}&mask=${encodeURIComponent(mk)}&temp_limit=${tl}`,{method:'POST'}).then(r=>r.json()).then(update);
 }
 function stopCrack(){fetch('/api/stop',{method:'POST'}).then(r=>r.json()).then(update)}
+function loadLog(){fetch('/api/log').then(r=>r.json()).then(d=>{document.getElementById('log-file').textContent=d.lines.join('\\n')})}
+function listPcaps(){fetch('/api/pcaps').then(r=>r.json()).then(d=>{document.getElementById('pcap-list').textContent=d.files.map(f=>f.name+' ('+(f.size/1024).toFixed(0)+'KB)').join('\\n')||'No pcaps'})}
 document.getElementById('temp-limit').addEventListener('input',function(){
 document.getElementById('temp-limit-val').textContent=this.value;
 });
-update();setInterval(update,2000);
+update();setInterval(update,2000);setInterval(loadLog,5000);setInterval(listPcaps,10000);
 </script></body></html>""")
 
 @app.get("/api/state")
@@ -419,6 +427,98 @@ async def api_stop():
     STATE["message"] = "Stopped"
     log("Crack stopped by user")
     return JSONResponse({"ok": True})
+
+@app.get("/api/log")
+async def api_log():
+    """Get file log (last 200 lines)."""
+    try:
+        with open(LOG_FILE, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        return JSONResponse({"lines": lines[-200:]})
+    except:
+        return JSONResponse({"lines": []})
+
+@app.get("/api/pcaps")
+async def api_pcaps():
+    """List uploaded pcaps + hash files."""
+    files = []
+    if os.path.exists(UPLOAD_DIR):
+        for f in sorted(os.listdir(UPLOAD_DIR), reverse=True):
+            path = os.path.join(UPLOAD_DIR, f)
+            size = os.path.getsize(path)
+            files.append({"name": f, "size": size, "path": path})
+    return JSONResponse({"files": files[:20]})
+
+@app.post("/api/crack_wordlist")
+async def api_crack_wordlist(wordlist_path: str, mode: str = "0", rules: str = None, mask: str = None, temp_limit: int = 85):
+    """Crack with a custom wordlist path."""
+    global TEMP_LIMIT
+    if temp_limit:
+        TEMP_LIMIT = temp_limit
+    if not STATE["hash_file"]:
+        return JSONResponse({"ok": False, "error": "No hash file"})
+    if not os.path.exists(wordlist_path):
+        return JSONResponse({"ok": False, "error": f"Wordlist not found: {wordlist_path}"})
+    threading.Thread(target=crack_hashes_custom, args=(STATE["hash_file"], wordlist_path, rules, mode, mask), daemon=True).start()
+    return JSONResponse({"ok": True})
+
+def crack_hashes_custom(hash_file, wordlist_path, rules_key, mode, mask):
+    """Crack with custom wordlist path."""
+    STATE["status"] = "cracking"
+    STATE["cracking"] = True
+    STATE["progress"] = 30
+    STATE["results"] = []
+    info = f"mode={mode}, wordlist={wordlist_path}, rules={rules_key or 'none'}"
+    STATE["attack_info"] = info
+    log(f"Starting hashcat custom ({info})")
+    try:
+        rules = RULES.get(rules_key) if rules_key else None
+        cmd = [HASHCAT, "-m", "22000",
+               "--self-test-disable", "--restore-disable",
+               f"--hwmon-temp-abort={TEMP_CRIT}", "-w", "2",
+               "--potfile-path", POTFILE]
+        if mode == "0":
+            cmd.extend(["-a", "0", hash_file, wordlist_path])
+            if rules:
+                cmd.extend(["-r", rules])
+        elif mode in ("3", "1", "mask"):
+            cmd.extend(["-a", "3", hash_file, wordlist_path, mask or "?d?d?d?d?d?d?d?d"])
+        log(f"CMD: {' '.join(cmd)}")
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=HASHCAT_DIR)
+        start_time = time.time()
+        last_log = 0
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            now = time.time()
+            if now - last_log > 15:
+                last_log = now
+                elapsed = int(now - start_time)
+                STATE["message"] = f"Cracking... ({elapsed}s)"
+                log(f"[{elapsed}s] {line[:150]}")
+            if re.match(r'^[0-9a-f]{64}:', line):
+                STATE["results"].append(line)
+                log(f"CRACKED: {line}")
+            if 'Speed' in line and ('MH/s' in line or 'kH/s' in line):
+                STATE["speed"] = line
+            if 'Status' in line:
+                log(f"STATUS: {line}")
+        proc.wait()
+        elapsed = int(time.time() - start_time)
+        results = STATE["results"]
+        if not results:
+            results.append("No match")
+        STATE["status"] = "idle"
+        STATE["cracking"] = False
+        STATE["progress"] = 100
+        STATE["message"] = f"Done ({elapsed}s): {len(results)} result(s)"
+        log(f"Done in {elapsed}s: {results}")
+    except Exception as e:
+        STATE["status"] = "idle"
+        STATE["cracking"] = False
+        STATE["message"] = f"Crack error: {e}"
+        log(f"Crack error: {e}")
 
 if __name__ == "__main__":
     log("Windows WiFi Cracker starting on port 8766...")
