@@ -11,6 +11,7 @@ hashes/
 
 # Logs
 *.log
+*.log.err
 
 # PID files
 *.pid
@@ -30,3 +31,91 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# Test/debug scripts (one-off SSH helpers)
+mac125_*.py
+mac_check_*.py
+mac_scan_*.py
+mac_debug_*.py
+mac_toggle*.py
+mac_deploy*.py
+mac_capture_eapol*.py
+mac_reconnect*.py
+mac_verify*.py
+mac_wake*.py
+mac_test_*.py
+mac_fix*.py
+mac_pick_*.py
+mac_find_*.py
+mac_start*.py
+mac_update*.py
+mac_upload*.py
+mac_scp_*.py
+mac_ping_*.py
+mac_wait_*.py
+mac_install_*.py
+mac_brew_*.py
+mac_final_*.py
+mac_try_*.py
+mac_control.py
+mac_debug2.py
+mac_debug3.py
+
+# Parse/debug scripts
+parse_*.py
+dbg_*.py
+check_*.py
+dump_*.py
+extract_*.py
+analyze_*.py
+decode_*.py
+convert_*.py
+verify_*.py
+reextract.py
+wpa2_extract.py
+fix_essid.py
+find_mac.py
+run_l_d8.py
+test_*.py
+test_*.ps1
+commit_push*.py
+setup_mac_ssh.py
+expect_ssh_mac.exp
+netdiag_*.py
+netdiag_*.md
+
+# Source code archives (not needed in repo)
+hcxtools-master/
+hcxtools.tar.gz
+hcxpcapngtool.c
+hcxpcapngtool_b64.txt
+module_22000.c
+module_22000_b64.txt
+
+# Misc
+monmon/
+wardrive_app/
+72.py
+
+# Windows cracker output
+win_cracker_out.log
+
+# Shell debug scripts
+_*.sh
+_*.py
+
+# Archives
+*.tar.xz
+*.tar.gz
+*.tgz
+
+# Plists
+*.plist
+
+# Misc dirs
+DeepSeek-Harness-Desktop/
+dsh-market/
+logs/
+
+# Handoff docs (temporary)
+MAC125_HANDOFF.md
