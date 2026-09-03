@@ -33,7 +33,7 @@ idle → scanning → capturing → extracting → cracking_local → uploading 
 | State | UI 顯示 |
 |-------|---------|
 | `scanning` | 進度條 + 「掃射中...」 |
-| `capturing` | SSID + BSSID + 倒數秒 + 已抓到 EAPOL 封包數 |
+| `capturing` | SSID + BSSID + 倒數秒 + 已抓到 EAPOL 封包數 + 介面名稱 |
 | `extracting` | 「提取 hash...」 |
 | `cracking_local` | 目前 tier + 進度條 + speed + ETA + 已掃完 tier 打勾 |
 | `uploading` | 「上傳至 Windows 4090...」 |
