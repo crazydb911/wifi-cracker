@@ -206,6 +206,23 @@ def extract_hashes(pcap_path, ssid, ap_mac_hint=None):
         STATE["message"] = f"Extract error: {e}"
         log(f"Extract error: {e}")
 
+def notify_mac(password):
+    """Notify Mac that Windows cracked the password."""
+    import requests
+    MAC_URL = "http://192.168.1.125:8765"
+    try:
+        log(f"Notify Mac: {password}")
+        r = requests.post(
+            f"{MAC_URL}/api/result",
+            json={"password": password, "source": "windows_4090"},
+            timeout=10)
+        if r.status_code == 200:
+            log(f"Mac notified: {r.status_code}")
+        else:
+            log(f"Mac notify failed: {r.status_code}")
+    except Exception as e:
+        log(f"Mac notify error: {e}")
+
 def crack_hashes(hash_file, wordlist_key, rules_key=None, mode="0", mask=None):
     STATE["status"] = "cracking"
     STATE["cracking"] = True
@@ -282,11 +299,15 @@ def crack_hashes(hash_file, wordlist_key, rules_key=None, mode="0", mask=None):
         results = STATE["results"]
         if not results:
             results.append("No match")
-        STATE["status"] = "idle"
+        STATE["status"] = "cracked" if len(results) > 0 and results[0] != "No match" else "idle"
         STATE["cracking"] = False
         STATE["progress"] = 100
         STATE["message"] = f"Done ({elapsed}s): {len(results)} result(s)"
         log(f"Done in {elapsed}s: {results}")
+        
+        # Notify Mac if cracked
+        if STATE["status"] == "cracked":
+            notify_mac(results[0])
     except Exception as e:
         STATE["status"] = "idle"
         STATE["cracking"] = False
@@ -397,6 +418,39 @@ async def get_state():
     get_gpu_status()
     get_crack_status()
     return JSONResponse(STATE)
+
+@app.post("/api/receive-hash")
+async def api_receive_hash(request: Request):
+    """Receive hash from Mac for complex wordlist cracking."""
+    data = await request.json()
+    hash_str = data.get("hash")
+    ssid = data.get("ssid")
+    bssid = data.get("bssid")
+    
+    if not hash_str:
+        return JSONResponse({"ok": False, "error": "No hash"})
+    
+    log(f"Received hash from Mac: SSID={ssid}, BSSID={bssid}")
+    log(f"Hash: {hash_str[:50]}...")
+    
+    # Save hash to file
+    hash_file = os.path.join(UPLOAD_DIR, f"hash_{int(time.time())}.hc22000")
+    with open(hash_file, 'w') as f:
+        f.write(hash_str + '\n')
+    
+    STATE["hash_file"] = hash_file
+    STATE["hash_count"] = 1
+    STATE["ssid"] = ssid
+    STATE["status"] = "cracking"
+    STATE["cracking"] = True
+    STATE["message"] = f"Cracking {ssid} with complex wordlist (1.4M)..."
+    STATE["progress"] = 60
+    
+    # Start cracking with complex wordlist (wifi_wordlist_combined.txt)
+    threading.Thread(target=thermal_monitor, daemon=True).start()
+    threading.Thread(target=crack_hashes, args=(hash_file, "wifi_wordlist", None, "0", None), daemon=True).start()
+    
+    return JSONResponse({"ok": True, "message": "Hash received, cracking with complex wordlist"})
 
 @app.post("/api/extract")
 async def api_extract(file: UploadFile = File(...), ssid: str = "32H9F_5G"):
