@@ -130,3 +130,23 @@ Mac 抓 EAPOL (monitor mode)  →  hcxpcapngtool  →  .hc22000 (m=22000 hash)
     -device qemu-xhci,id=xhci -device usb-host,vendorid=0x05ac,productid=0x1905 \
     -display none -monitor none -serial file:/tmp/vmsetup/serial.log
   ```
+
+### 小米手機支線 (2026-08-29)
+- **型號確認: Xiaomi 11T (M2102J2SC)** — codename thyme
+- **SoC: Snapdragon 888 (SM8250 / kona)**, Android 13, MIUI V140, arm64-v8a
+- **WiFi 晶片: WCN6856** (cnss_pci 驅動, PCIe 0000:01:00.0), netdev = wlan0 + p2p0
+- **Root: Magisk** (/system/bin/su -> magisk), 已 jailbroken; 但 `adb shell su -c` 目前回 Permission denied
+  - `adb root` 失敗 (production build)
+  - 待解: Magisk 授權 shell (設定 → ADB/Shizuku 授權) 或手機上接受 Magisk 提示
+- 抓包路線: SD888/WCN6856 的 in-tree 驅動 monitor mode 支援度需以 `iw phy phy0 info` 的 valid interface combinations 確認 (需 root)
+- 工具: 直接用大神工具 (Kali Netshunter / termux+tcpdump+mdk4), 不自己寫解析
+- ADB 路徑 (Windows): `/c/Users/crazydb911/AppData/Local/Microsoft/WinGet/Packages/Google.PlatformTools_Microsoft.Winget.Source_8wekyb3d8bbwe/platform-tools/adb.exe`
+- 裝置序列: 24d165c4
+
+### Jammy aarch64 VM — SSH 已通 (2026-08-29)
+- **VM SSH 成功**: `tongbao` + ed25519 key (`C:/Users/crazydb911/.ssh/vm_tongbao`) @ 192.168.1.125:2222
+- 關鍵: cloud-init users/ssh_authorized_keys modules 是 **per-instance** → 重建 ISO 時 meta-data 的 instance-id 必須換新 (現用 jammyvm4); 最終用 `runcmd:` 直接 useradd/chpasswd/寫 authorized_keys/sshd drop-in
+- sudo: `/etc/sudoers.d/tongbao` NOPASSWD ALL (root pw 也是 240628)
+- 磁碟: root 分區已滿 2.2G 上限 → apt clean 後 438M free (78%)
+- sources.list universe 已啟用; **firmware-misc-nonfree 待裝** (apt lists 壞掉 → `rm -rf /var/lib/apt/lists/*` 後重 update)
+- QEMU 驗證指令 (cidata7.cdr, port 2222): 見前段; USB 穿透待 DWA-160 插上 Mac
