@@ -1,0 +1,28 @@
+{
+  "stages": {
+    "1": {
+      "status": "exhausted"
+    },
+    "2": {
+      "status": "exhausted"
+    },
+    "3": {
+      "status": "exhausted"
+    },
+    "4": {
+      "status": "exhausted"
+    },
+    "5": {
+      "status": "running",
+      "progress": null
+    }
+  },
+  "gear": 80,
+  "cracked": false,
+  "password": null,
+  "schedule": {
+    "enabled": true,
+    "start": "23:00",
+    "end": "06:30"
+  }
+}
