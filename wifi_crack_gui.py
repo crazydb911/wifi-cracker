@@ -849,18 +849,18 @@ class App:
 
     def check_schedule(self):
         try:
-            if self.schedule["enabled"]:
-                now = time.strftime("%H:%M")
-                running = self.worker.is_running_hashcat()
-                if self._sched_in_range(now) and running:
-                    self.log("🕒 排程時間到 (自動暫停): %s" % now)
-                    self._sched_paused = True
-                    self.on_pause()
-                elif not self._sched_in_range(now) and not running \
-                        and self._sched_paused:
-                    self._sched_paused = False
-                    self.log("🕒 排程時間結束 (自動恢復): %s" % now)
-                    self.on_resume()
+            now = time.strftime("%H:%M")
+            running = self.worker.is_running_hashcat()
+            active = self.schedule["enabled"] and self._sched_in_range(now)
+            if active and running:
+                self.log("🕒 排程時間到 (自動暫停): %s" % now)
+                self._sched_paused = True
+                self.on_pause()
+            elif not active and not running and self._sched_paused:
+                # 排程結束, 或用戶把排程關掉了 → 釋放排程造成的暫停
+                self._sched_paused = False
+                self.log("🕒 排程時間結束 (自動恢復): %s" % now)
+                self.on_resume()
         except Exception:
             self.log("❌ 排程錯誤:\n" + traceback.format_exc())
         self.root.after(60000, self.check_schedule)
