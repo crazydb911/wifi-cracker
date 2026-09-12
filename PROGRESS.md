@@ -68,7 +68,11 @@ hcxpcapngtool -o /tmp/cap.22000 /tmp/cap.pcap       # 注意是 hcxpcapngtool（
   - **`M1:194 / M3:1` = PMKSA cache 鐵證**：AP 每次都發 M1（4-way 起手），但 client 用 **PMKID 快重連**（Reassociation with PMKID）跳過 M2/M3/M4 → 194 個 M1 只有 1 個 M3 回應，**組不成完整 4-way**。
   - deauth 風暴再兇（25,643 個）都只得到 M1 → **核心卡點是 PMKSA，不是 deauth 不夠兇**。
   - 去重後只有 **2 筆 hash（2× PMKID）**，跟原 `hs.22000` 相同（EAPOL 那 2 筆是更早全幀 capture 抓到的）。
-- **v3「hammer-then-settle」**（`_cap_v3.sh`）：前 120s 重 deauth（逼 client 掉線、令其 PMKSA 失效）＋ 後 180s 輕 deauth（每 ~15s，讓完整重連被抓到）＋ snap 512（radiotap+beacon 不截 → 減 malformed beacon）。待跑。
+- **v3「hammer-then-settle」**（`_cap_v3.sh`，300s 實測）：前 120s 重 deauth ＋ 後 180s 輕 deauth ＋ snap 512。**結果更差**（1 hash < v2 的 2）：**aireplay-ng 注入卡在 ~1 幀/秒（driver 層，並行 4 支仍 80 幀/80s = 無效）** → hammer 120s 只跑 2 burst，風暴變滴漏，PMKSA 沒被打斷。
+- **v4「hcxdumptool 大神參數」**（`_cap_v4.sh`，2026-09-12，240s 實測，**已驗證可用**）：hcx 官方維護者 **ZerBea 首推 hcxdumptool 取代 aireplay**（內建 3 攻擊：PMKID 關聯 + client 斷線抓完整 4-way + M2 challenge，不受 ~1幀/秒 限制）。大神參數：`-o <file> -c 1 --bpfc=<鎖定AP的BPF> --eapoltimeout=20000 --enable_status=1`（BPF：`tcpdump ... 'wlan addr1 <AP> or wlan addr2 <AP>' -ddd`）。
+  - **✅ 抓到全新 PMKID**：`WPA*01*42f328a124a1f89060889c40f5bf9696*bc3e0701dc98*c02250e77c8a*333248313046***`（ROGUE client 關聯，KDV:2）— 原本 4 hash 都沒有。
+  - **❌ 4-way 仍抓不到**：EAPOL M1:31 但 M3/M4=0 → 真實 client 仍 PMKSA 快重連（protocol 層頑固，v2/v3/v4 一致）。
+  - **結論**：hcxdumptool > aireplay（以後用這個）；新 PMKID 是 bonus（同 keyspace，下次重跑合併）；4-way 唯一可靠路 = 更長 capture 抓自然重連，但**手上已有 2 個 EAPOL 4-way，crack 覆蓋已夠**。
 - **PMKSA 打破路線**（待驗證）：client 被 deauth 後立即用 PMKSA 快重連。可靠解 = (a) **更長 capture 抓「自然完整重連」**（sleep/wake、PMKSA 過期）、(b) **hcxdumptool** 專用工具、(c) hammer-then-settle。目前 **2× PMKID 已可 crack**（stage 5 跑中，rockyou 14M + rockyou-30000.rule）。
 
 ## ⏱ 2026-09-08 目前進度快照 (32H10F)
