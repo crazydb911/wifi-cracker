@@ -61,6 +61,16 @@ hcxpcapngtool -o /tmp/cap.22000 /tmp/cap.pcap       # 注意是 hcxpcapngtool（
 ```
 > 前臺 SSH 超過 ~110s 會 timeout → 一律 **nohup 背景跑 + 輪詢 log 檔**。`-w -`（stdout 重定向）因為 tcpdump 是 setuid、`-w /tmp/file` 會寫 0 位元組。
 
+### 🔬 抓包管線優化 v2/v3 + PMKSA 鐵證 (2026-09-12, 120s 實測)
+- **v2 優化**（`_cap_v2.sh`）：snap 96→256、時間窗 70→300s、**持續 deauth 風暴**（取代固定 6 輪）、動態發現 client MAC、`sort -u` 去重、完整報表（EAPOL M1-M4 / PMKID / capture size）。
+- **120s 實測結果（關鍵）**：
+  - capture 2.55MB / 32,797 封包 / **EAPOL M1: 194 / M3: 1** / DEAUTH 25,643 / **PMKID(best) 2**。
+  - **`M1:194 / M3:1` = PMKSA cache 鐵證**：AP 每次都發 M1（4-way 起手），但 client 用 **PMKID 快重連**（Reassociation with PMKID）跳過 M2/M3/M4 → 194 個 M1 只有 1 個 M3 回應，**組不成完整 4-way**。
+  - deauth 風暴再兇（25,643 個）都只得到 M1 → **核心卡點是 PMKSA，不是 deauth 不夠兇**。
+  - 去重後只有 **2 筆 hash（2× PMKID）**，跟原 `hs.22000` 相同（EAPOL 那 2 筆是更早全幀 capture 抓到的）。
+- **v3「hammer-then-settle」**（`_cap_v3.sh`）：前 120s 重 deauth（逼 client 掉線、令其 PMKSA 失效）＋ 後 180s 輕 deauth（每 ~15s，讓完整重連被抓到）＋ snap 512（radiotap+beacon 不截 → 減 malformed beacon）。待跑。
+- **PMKSA 打破路線**（待驗證）：client 被 deauth 後立即用 PMKSA 快重連。可靠解 = (a) **更長 capture 抓「自然完整重連」**（sleep/wake、PMKSA 過期）、(b) **hcxdumptool** 專用工具、(c) hammer-then-settle。目前 **2× PMKID 已可 crack**（stage 5 跑中，rockyou 14M + rockyou-30000.rule）。
+
 ## ⏱ 2026-09-08 目前進度快照 (32H10F)
 
 ### 已確認
