@@ -33,6 +33,16 @@ Mac 抓 EAPOL (monitor mode)  →  hcxpcapngtool  →  .hc22000 (m=22000 hash)
 - **結論**：EAPOL 抓包 bug 已修（全幀 + 對的頻道）；剩下抓不到新 EAPOL 是 **protocol 層（PMKSA）**，不是抓包 bug。
 - 現有 `captures/hs.22000` 已含 **4 個 hash**（2× PMKID bc61+e689, 2× EAPOL）；stage 5（rockyou 14M + rockyou-30000.rule）~2.2 kH/s，剩 ~2 天。
 
+### 🔬 hash 有效性驗證 + hashcat「掛死 zombie」診斷 (2026-09-12, 使用者手動停止後)
+- **hash 本身沒被抓包 bug 弄壞**：hashcat self-test 逐個 parse，`Parsed 8/8`、`4 unique digests, 1 unique salt`、`Finished self-test` 全過。
+  - 2× PMKID 來自 **mgmt (Association) frame** → `wlan type mgt` filter 抓得到 → 有效。
+  - 2× EAPOL 是 **DATA frame**（bug 會漏），但手上有**完整** M1–M4 + cipher → 來自全幀的 hcxdumptool → 有效。
+- **真正卡住的不是 hash，是 hashcat 行程掛死**：先前 PID 119284 呈 **WorkingSet 1MB / 0 CPU time / 不在 `nvidia-smi --query-compute-apps` / restore 檔停在 14h 前** = 典型掛死 zombie。（GPU 20GB VRAM + 功率尖峰其實是 llama-server pid 28664 的 qwen-vision-router，不是 hashcat。）
+- **`--restore` 接續失敗**：zombie 死前把 `restore_stage5.bin` 寫損毀（magic `6302 0000` 後面一堆 0）→ 加 `--restore` 就回 `Usage`；已備份為 `restore_stage5.bin.bak`。
+- **已 fresh 重啟並驗證健康**：PowerShell `Start-Process` detach（活過 tool-call），GUI 完全一致的指令（無 `--restore`）：
+  - PID 111040 在 GPU、**GPU Util 99% / Core 2550MHz / Temp 76°C**、**Speed 1.4–2.2 kH/s**、WorkingSet 20MB、CPU 時間累積 = 確定在算；Progress 0→6%、ETA ~2 天 2 小時；丟失舊 ~9.7% 進度（≈6h GPU）。
+  - **ZOMBIE hashcat 判定法**：`WorkingSet ~1MB + 0 CPU + 不在 nvidia-smi --query-compute-apps + restore mtime 停擺` → 掛死，重啟。
+
 ### 📋 工作中的 capture recipe（VM, RT5572 `wlx0087332d8260`）
 ```sh
 pkill -9 -f aireplay-ng; pkill -9 -f tcpdump        # 清殘留
