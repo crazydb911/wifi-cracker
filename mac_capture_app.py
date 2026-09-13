@@ -17,6 +17,7 @@ import subprocess
 import threading
 import time
 import json
+import re
 import urllib.request
 import os
 
@@ -30,8 +31,20 @@ MON_SOCK    = '/tmp/vm_app_monitor.sock'
 SSH_KEY     = os.path.expanduser('~/.ssh/vm_tongbao')
 
 # ---------- local offline hash store (on the Mac) ----------
+# 檔名 = {SSID}_{YYYY-MM-DD}.22000（每個 Wi-Fi 每天一個檔，命名清楚）
 LOCAL_DIR   = os.path.expanduser('~/MacCapture/captures')
-LOCAL_HASH  = os.path.join(LOCAL_DIR, 'captures.22000')
+
+def local_hash_path(ssid):
+    """本機 hash 檔路徑：~/MacCapture/captures/{SSID}_{YYYY-MM-DD}.22000"""
+    safe = re.sub(r'[^A-Za-z0-9._-]', '_', ssid.strip()) or 'wifi'
+    date = time.strftime('%Y-%m-%d')
+    return os.path.join(LOCAL_DIR, '%s_%s.22000' % (safe, date))
+
+def local_hash_files():
+    """本機所有 hash 檔（*.22000）的完整路徑列表。"""
+    if not os.path.isdir(LOCAL_DIR):
+        return []
+    return sorted(os.path.join(LOCAL_DIR, f) for f in os.listdir(LOCAL_DIR) if f.endswith('.22000'))
 
 # ---------- defaults (32H10F) ----------
 DEFAULTS = {
@@ -88,10 +101,15 @@ class MacCaptureApp:
         self.log = scrolledtext.ScrolledText(root, height=16, width=84)
         self.log.grid(row=r + 2, column=0, columnspan=2, padx=12, pady=8)
         self.logline('就緒。DWA-160 要插上 Mac；Windows cracker 沒開也行（hash 會存本機，之後按「重送」）。')
-        if os.path.exists(LOCAL_HASH):
-            with open(LOCAL_HASH) as _f:
-                _n = sum(1 for _line in _f if _line.strip())
-            self.logline('💾 本機已存 %d 個 hash（%s）' % (_n, LOCAL_HASH))
+        _files = local_hash_files()
+        if _files:
+            self.logline('💾 本機 hash 檔（%s）：' % LOCAL_DIR)
+            for _fp in _files:
+                with open(_fp) as _f:
+                    _n = sum(1 for _line in _f if _line.strip())
+                self.logline('   %s  (%d hash)' % (os.path.basename(_fp), _n))
+        else:
+            self.logline('💾 本機還沒存過 hash（%s）' % LOCAL_DIR)
 
     # ---- helpers ----
     def logline(self, msg):
@@ -104,21 +122,22 @@ class MacCaptureApp:
         except Exception:
             pass
 
-    def save_local(self, hash_lines):
-        """把抓到的 hash 存到 Mac 本機（去重 append）。離線能力核心。"""
+    def save_local(self, ssid, hash_lines):
+        """把抓到的 hash 存到 Mac 本機（檔名 = SSID_日期）。離線能力核心。"""
         try:
             os.makedirs(LOCAL_DIR, exist_ok=True)
+            path = local_hash_path(ssid)
             existing = set()
-            if os.path.exists(LOCAL_HASH):
-                with open(LOCAL_HASH) as f:
+            if os.path.exists(path):
+                with open(path) as f:
                     existing = set(line.strip() for line in f if line.strip())
             new = [h for h in hash_lines if h not in existing]
             if new:
-                with open(LOCAL_HASH, 'a') as f:
+                with open(path, 'a') as f:
                     for h in new:
                         f.write(h + '\n')
             self.logline('   💾 本機已存 %d 個 hash（新增 %d）→ %s' % (
-                len(existing) + len(new), len(new), LOCAL_HASH))
+                len(existing) + len(new), len(new), path))
             return len(new)
         except Exception as e:
             self.logline('   ⚠️ 存本機失敗: %r' % e)
@@ -146,24 +165,36 @@ class MacCaptureApp:
         return posted
 
     def resend(self):
-        """把 Mac 本機存的 hash 重新 POST 給 Windows（等 Windows 開起來後用）。"""
+        """把 Mac 本機存的 hash（所有 SSID_日期.22000）重新 POST 給 Windows。"""
         wip = self.var['windows_ip'].get().strip()
         port = self.var['port'].get().strip()
         ssid = self.var['ssid'].get().strip()
         bssid = self.var['bssid'].get().strip().upper()
-        if not os.path.exists(LOCAL_HASH):
-            self.logline('📭 本機沒有存的 hash（%s 不存在）' % LOCAL_HASH)
+        files = local_hash_files()
+        if not files:
+            self.logline('📭 本機沒有存的 hash（%s 沒有 *.22000）' % LOCAL_DIR)
             return
-        with open(LOCAL_HASH) as f:
-            hashes = [line.strip() for line in f if line.strip()]
-        if not hashes:
-            self.logline('📭 本機 hash 檔是空的')
+        all_hashes = []
+        self.logline('📂 本機 hash 檔：')
+        for fp in files:
+            with open(fp) as f:
+                hs = [line.strip() for line in f if line.strip()]
+            all_hashes.extend(hs)
+            self.logline('   %s  (%d hash)' % (os.path.basename(fp), len(hs)))
+        seen = set()
+        uniq = []
+        for h in all_hashes:
+            if h not in seen:
+                seen.add(h)
+                uniq.append(h)
+        if not uniq:
+            self.logline('📭 本機 hash 檔全是空的')
             return
-        self.logline('🔄 重送 %d 個本機 hash 到 %s:%s ...' % (len(hashes), wip, port))
-        posted = self.post_hashes(hashes, ssid, bssid, wip, port)
+        self.logline('🔄 重送 %d 個本機 hash（%d 檔）到 %s:%s ...' % (len(uniq), len(files), wip, port))
+        posted = self.post_hashes(uniq, ssid, bssid, wip, port)
         self.logline('   重送完成 %d/%d。%s' % (
-            posted, len(hashes),
-            '' if posted == len(hashes) else '（沒送完的還在 Mac 本機，Windows 開起來再按重送）'))
+            posted, len(uniq),
+            '' if posted == len(uniq) else '（沒送完的還在 Mac 本機，Windows 開起來再按重送）'))
 
     def start(self):
         self.btn.config(state='disabled')
@@ -273,9 +304,9 @@ class MacCaptureApp:
             for h in hash_lines:
                 self.logline('   HASH: %s' % (h[:64] + ('...' if len(h) > 64 else '')))
 
-            # 4.5 存本機（離線能力：Windows 沒開也保得住）
+            # 4.5 存本機（離線能力：Windows 沒開也保得住；檔名 = SSID_日期）
             if hash_lines:
-                self.save_local(hash_lines)
+                self.save_local(ssid, hash_lines)
             else:
                 self.logline('   💾 本次 0 hash（本機未新增）')
 
