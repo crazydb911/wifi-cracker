@@ -233,9 +233,12 @@ def crack_hashes(hash_file, wordlist_key, rules_key=None, mode="0", mask=None):
     STATE["attack_info"] = info
     log(f"Starting hashcat ({info})")
     try:
-        # 4090 runs at FULL power: -w 3 (EXTRA workload = max perf, still caps
-        # GPU VRAM at a sane level = the memory limit), and NO --hwmon-temp-abort
-        # (no temp throttling -> the GPU is never power-limited).
+        # 4090 @ user's 225W cap: -w 3 (EXTRA workload = max perf) +
+        # --backend-devices-keepfree=98 = the measured VRAM sweet spot (with the
+        # LLM ninefr/qwen3-27b holding ~21.6GB): hashcat gets ~599MB free VRAM
+        # at ~1063-1990 kH/s without OOMing the LLM. Higher keepfree starves
+        # hashcat (its free-VRAM budget drops to ~0); lower risks OOM on LLM
+        # inference spikes. No --hwmon-temp-abort (225W already caps the temp).
         cmd = [HASHCAT, "-m", "22000",
                "--self-test-disable", "--restore-disable",
                "-w", "3",
@@ -447,12 +450,16 @@ async def api_receive_hash(request: Request):
     STATE["ssid"] = ssid
     STATE["status"] = "cracking"
     STATE["cracking"] = True
-    STATE["message"] = f"Cracking {ssid} with complex wordlist (1.4M)..."
+    STATE["message"] = f"Cracking {ssid} with rockyou (14M) + best66 rules..."
     STATE["progress"] = 60
     
-    # Start cracking with complex wordlist (wifi_wordlist_combined.txt)
+    # Best cracking config (measured on the 4090 at 225W): rockyou (14M words)
+    # + best66 rules -> ~947M candidates at ~1990 kH/s (2x faster and ~5000x
+    # more coverage than the 175k-word wifi_wordlist). rockyou runs faster
+    # because hashcat doesn't throttle on a large wordlist (wifi_wordlist is
+    # under the ~196608 base-word minimum, so it throttles to ~1063 kH/s).
     threading.Thread(target=thermal_monitor, daemon=True).start()
-    threading.Thread(target=crack_hashes, args=(hash_file, "wifi_wordlist", None, "0", None), daemon=True).start()
+    threading.Thread(target=crack_hashes, args=(hash_file, "rockyou", "best66", "0", None), daemon=True).start()
     
     return JSONResponse({"ok": True, "message": "Hash received, cracking with complex wordlist"})
 
@@ -531,9 +538,12 @@ def crack_hashes_custom(hash_file, wordlist_path, rules_key, mode, mask):
     log(f"Starting hashcat custom ({info})")
     try:
         rules = RULES.get(rules_key) if rules_key else None
-        # 4090 runs at FULL power: -w 3 (EXTRA workload = max perf, still caps
-        # GPU VRAM at a sane level = the memory limit), and NO --hwmon-temp-abort
-        # (no temp throttling -> the GPU is never power-limited).
+        # 4090 @ user's 225W cap: -w 3 (EXTRA workload = max perf) +
+        # --backend-devices-keepfree=98 = the measured VRAM sweet spot (with the
+        # LLM ninefr/qwen3-27b holding ~21.6GB): hashcat gets ~599MB free VRAM
+        # at ~1063-1990 kH/s without OOMing the LLM. Higher keepfree starves
+        # hashcat (its free-VRAM budget drops to ~0); lower risks OOM on LLM
+        # inference spikes. No --hwmon-temp-abort (225W already caps the temp).
         cmd = [HASHCAT, "-m", "22000",
                "--self-test-disable", "--restore-disable",
                "-w", "3",
