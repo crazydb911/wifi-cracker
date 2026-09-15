@@ -42,6 +42,7 @@ WL      = r"C:\wifi-crack\wordlists"
 WIFI_WL = WL + r"\wifi_wordlist_combined.txt"   # base 176K
 ROCK    = WL + r"\rockyou.txt"                  # base 14M
 ROCK_GZ = WL + r"\rockyou.txt.gz"
+CRACKED = WL + r"\cracked.txt.gz"               # WPA 專用 805K (wpa-sec.stanev.org, 大神推薦)
 INBOX   = r"C:\wifi-crack\crack_inbox"
 RESULT  = r"C:\wifi-crack\crack_results"
 STATE   = RESULT + r"\state.json"
@@ -54,11 +55,12 @@ GEARS = {50: 225, 70: 315, 80: 360, 90: 405, 100: 450}
 GEAR_LABELS = ["50% (225W)", "70% (315W)", "80% (360W)", "90% (405W)", "100% (450W) 全速"]
 
 STAGE_DEFS = [
-    (1, "SSID 衍生詞庫 (32H10F 組合)", None,     None),
-    (2, "wifi_wordlist base (176K)",  WIFI_WL,  None),
-    (3, "rockyou base (14M)",         ROCK,     None),
-    (4, "rockyou + best66.rule (~5.3B)", ROCK, R_B66),
-    (5, "rockyou + rockyou-30000.rule (~430B)", ROCK, R_30K),
+    (1, "SSID 衍生詞庫 (32H10F 組合)", None,               None),
+    (2, "wifi_wordlist base (176K)",   WIFI_WL,            None),
+    (3, "cracked.txt WPA 專用 (805K)", CRACKED,            None),  # 大神推薦 wpa-sec.stanev.org
+    (4, "rockyou base (14M)",          ROCK,               None),
+    (5, "rockyou + best66.rule (~5.3B)", ROCK,             R_B66),
+    (6, "rockyou + rockyou-30000.rule (~430B)", ROCK,      R_30K),
 ]
 
 # ---------- 狀態檔 ----------
@@ -151,8 +153,9 @@ def check_crack(hf):
     return None
 
 def apply_gear(pct):
+    """功率限制已拿掉 (改用 --backend-devices-keepfree 限記憶體), 設全速 450W."""
     try:
-        subprocess.run(["nvidia-smi", "-pl", str(GEARS[pct])], timeout=10,
+        subprocess.run(["nvidia-smi", "-pl", "450"], timeout=10,
                        capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
         return True
     except Exception:
@@ -301,6 +304,7 @@ class Worker(threading.Thread):
         rule = stage_rule(sid)
         restore = RESULT + r"\restore_stage%d.bin" % sid
         cmd = [HC, "-m", str(MODE), "-a", "0", "-w", "3",
+               "--backend-devices-keepfree=98",
                "--potfile-path", POT,
                "--session", "stage%d" % sid,
                "--restore-file-path", restore,
@@ -601,15 +605,14 @@ class App:
                                      state="disabled")
         self.resume_btn.pack(side="left", padx=6)
 
-        ttk.Label(btn, text="GPU 功率:").pack(side="left", padx=(20, 4))
-        self.gear_var = tk.StringVar(value="80% (360W)")
-        self.gear_box = ttk.Combobox(btn, textvariable=self.gear_var, width=12,
-                                     state="readonly",
-                                     values=GEAR_LABELS)
-        g = self.st.get("gear", 80)
-        self.gear_box.set("%d%% (%dW)" % (g, GEARS[g]))
-        self.gear_box.pack(side="left")
-        self.gear_box.bind("<<ComboboxSelected>>", self.on_gear)
+        # 功率限制已拿掉 (改用 keepfree=98 限記憶體 512MB, 給 llama-server 留 20GB+)
+        # ttk.Label(btn, text="GPU 功率:").pack(side="left", padx=(20, 4))
+        # self.gear_var = tk.StringVar(value="80% (360W)")
+        # self.gear_box = ttk.Combobox(btn, textvariable=self.gear_var, width=12,
+        #                              state="readonly", values=GEAR_LABELS)
+        # self.gear_box.set("%d%% (%dW)" % (self.st.get("gear", 80), GEARS[self.st.get("gear", 80)]))
+        # self.gear_box.pack(side="left")
+        # self.gear_box.bind("<<ComboboxSelected>>", self.on_gear)
 
         # 排程 (免跑時段, 自動暫停/恢復)
         self.sched_label = ttk.Label(btn, text="🕒 —", foreground="#06c")
@@ -647,12 +650,8 @@ class App:
             self.state_label.configure(text="重新啟動中...", foreground="#080")
 
     def on_gear(self, ev=None):
-        txt = self.gear_var.get()
-        pct = int(txt.split("%")[0])
-        self.st["gear"] = pct
-        save_state(self.st)
-        self.root.after(0, lambda: apply_gear(pct))
-        self.log("GPU 功率 → %s" % txt)
+        """功率限制已拿掉 (no-op)."""
+        pass
 
     def on_close(self):
         w = self.worker
