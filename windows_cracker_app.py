@@ -338,12 +338,15 @@ def crack_hashes(hash_file, wordlist_key, rules_key=None, mode="0", mask=None, f
 # the dominant "word+digits" WiFi pattern (dragon2024, password123); the 8-digit
 # mask catches numeric/default passphrases; the dive stage widens rule coverage.
 RECEIVE_STAGES = [
-    # (wordlist_key, rules_key, mode, mask, label)
+    # (wordlist_key, rules_key, mode, mask, label)  -- ordered FAST -> SLOW so the
+    # high-value, cheap stages run first; the exhaustive 140B 4-digit rockyou
+    # hybrid runs last (an over-night stage) and only if nothing earlier cracked.
     ("rockyou", "best66", "0", None, "rockyou + best66 rules (quick wins)"),
-    ("rockyou", None, "6", "?d?d?d?d", "rockyou word + 4-digit suffix (word2024)"),
-    ("rockyou", None, "6", "?d?d?d", "rockyou word + 3-digit suffix"),
-    (None, None, "3", "?d?d?d?d?d?d?d?d", "8-digit numeric mask (default pws)"),
-    ("rockyou", "dive", "0", None, "rockyou + dive rules (extra coverage)"),
+    ("rockyou", None, "6", "?d?d", "rockyou + 2-digit suffix (word24)"),
+    ("wifi_wordlist", None, "6", "?d?d?d?d", "wifi words + 4-digit suffix"),
+    (None, None, "3", "?d?d?d?d?d?d?d?d", "8-digit numeric (numeric-only password)"),
+    ("rockyou", "dive", "0", None, "rockyou + dive rules (leet/case variants)"),
+    ("rockyou", None, "6", "?d?d?d?d", "rockyou + 4-digit suffix (word2024) [over-night]"),
 ]
 
 def crack_receive_sequence(hash_file):
