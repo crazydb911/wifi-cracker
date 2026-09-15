@@ -233,9 +233,13 @@ def crack_hashes(hash_file, wordlist_key, rules_key=None, mode="0", mask=None):
     STATE["attack_info"] = info
     log(f"Starting hashcat ({info})")
     try:
+        # 4090 runs at FULL power: -w 3 (EXTRA workload = max perf, still caps
+        # GPU VRAM at a sane level = the memory limit), and NO --hwmon-temp-abort
+        # (no temp throttling -> the GPU is never power-limited).
         cmd = [HASHCAT, "-m", "22000",
                "--self-test-disable", "--restore-disable",
-               f"--hwmon-temp-abort={TEMP_CRIT}", "-w", "2",
+               "-w", "3",
+               "--backend-devices-keepfree=98",
                "--potfile-path", POTFILE]
         if mode == "0":
             # Straight: wordlist (with optional rules)
@@ -527,9 +531,13 @@ def crack_hashes_custom(hash_file, wordlist_path, rules_key, mode, mask):
     log(f"Starting hashcat custom ({info})")
     try:
         rules = RULES.get(rules_key) if rules_key else None
+        # 4090 runs at FULL power: -w 3 (EXTRA workload = max perf, still caps
+        # GPU VRAM at a sane level = the memory limit), and NO --hwmon-temp-abort
+        # (no temp throttling -> the GPU is never power-limited).
         cmd = [HASHCAT, "-m", "22000",
                "--self-test-disable", "--restore-disable",
-               f"--hwmon-temp-abort={TEMP_CRIT}", "-w", "2",
+               "-w", "3",
+               "--backend-devices-keepfree=98",
                "--potfile-path", POTFILE]
         if mode == "0":
             cmd.extend(["-a", "0", hash_file, wordlist_path])
