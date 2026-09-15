@@ -51,9 +51,6 @@ GUI_LOG = RESULT + r"\gui.log"
 LOCK    = RESULT + r"\gui.lock"
 MODE    = 22000
 
-GEARS = {50: 225, 70: 315, 80: 360, 90: 405, 100: 450}
-GEAR_LABELS = ["50% (225W)", "70% (315W)", "80% (360W)", "90% (405W)", "100% (450W) 全速"]
-
 STAGE_DEFS = [
     (1, "SSID 衍生詞庫 (32H10F 組合)", None,               None),
     (2, "wifi_wordlist base (176K)",   WIFI_WL,            None),
@@ -152,14 +149,9 @@ def check_crack(hf):
         pass
     return None
 
-def apply_gear(pct):
-    """功率限制已拿掉 (改用 --backend-devices-keepfree 限記憶體), 設全速 450W."""
-    try:
-        subprocess.run(["nvidia-smi", "-pl", "450"], timeout=10,
-                       capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
-        return True
-    except Exception:
-        return False
+def apply_gear(pct=None):
+    # 功率限制已拿掉 (GPU power 由外部自行控制) — no-op, 不再呼叫 nvidia-smi -pl
+    return True
 
 def running_processes():
     """回傳執行中的 hashcat / python 行程 (GPU 搶佔檢查)."""
@@ -605,15 +597,6 @@ class App:
                                      state="disabled")
         self.resume_btn.pack(side="left", padx=6)
 
-        # 功率限制已拿掉 (改用 keepfree=98 限記憶體 512MB, 給 llama-server 留 20GB+)
-        # ttk.Label(btn, text="GPU 功率:").pack(side="left", padx=(20, 4))
-        # self.gear_var = tk.StringVar(value="80% (360W)")
-        # self.gear_box = ttk.Combobox(btn, textvariable=self.gear_var, width=12,
-        #                              state="readonly", values=GEAR_LABELS)
-        # self.gear_box.set("%d%% (%dW)" % (self.st.get("gear", 80), GEARS[self.st.get("gear", 80)]))
-        # self.gear_box.pack(side="left")
-        # self.gear_box.bind("<<ComboboxSelected>>", self.on_gear)
-
         # 排程 (免跑時段, 自動暫停/恢復)
         self.sched_label = ttk.Label(btn, text="🕒 —", foreground="#06c")
         self.sched_label.pack(side="left", padx=(16, 4))
@@ -648,10 +631,6 @@ class App:
             self.worker.resume_evt.set()
             self.resume_btn.configure(state="disabled")
             self.state_label.configure(text="重新啟動中...", foreground="#080")
-
-    def on_gear(self, ev=None):
-        """功率限制已拿掉 (no-op)."""
-        pass
 
     def on_close(self):
         w = self.worker
