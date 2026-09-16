@@ -42,7 +42,6 @@ WL      = r"C:\wifi-crack\wordlists"
 WIFI_WL = WL + r"\wifi_wordlist_combined.txt"   # base 176K
 ROCK    = WL + r"\rockyou.txt"                  # base 14M
 ROCK_GZ = WL + r"\rockyou.txt.gz"
-CRACKED = WL + r"\cracked.txt.gz"               # WPA 專用 805K (wpa-sec.stanev.org, 大神推薦)
 INBOX   = r"C:\wifi-crack\crack_inbox"
 RESULT  = r"C:\wifi-crack\crack_results"
 STATE   = RESULT + r"\state.json"
@@ -52,12 +51,11 @@ LOCK    = RESULT + r"\gui.lock"
 MODE    = 22000
 
 STAGE_DEFS = [
-    (1, "SSID 衍生詞庫 (32H10F 組合)", None,               None),
-    (2, "wifi_wordlist base (176K)",   WIFI_WL,            None),
-    (3, "cracked.txt WPA 專用 (805K)", CRACKED,            None),  # 大神推薦 wpa-sec.stanev.org
-    (4, "rockyou base (14M)",          ROCK,               None),
-    (5, "rockyou + best66.rule (~5.3B)", ROCK,             R_B66),
-    (6, "rockyou + rockyou-30000.rule (~430B)", ROCK,      R_30K),
+    (1, "SSID 衍生詞庫 (32H10F 組合)", None,     None),
+    (2, "wifi_wordlist base (176K)",  WIFI_WL,  None),
+    (3, "rockyou base (14M)",         ROCK,     None),
+    (4, "rockyou + best66.rule (~5.3B)", ROCK, R_B66),
+    (5, "rockyou + rockyou-30000.rule (~430B)", ROCK, R_30K),
 ]
 
 # ---------- 狀態檔 ----------
@@ -150,7 +148,7 @@ def check_crack(hf):
     return None
 
 def apply_gear(pct=None):
-    # 功率限制已拿掉 (GPU power 由外部自行控制) — no-op, 不再呼叫 nvidia-smi -pl
+    # GPU power is user-managed externally — no in-app nvidia-smi -pl.
     return True
 
 def running_processes():
@@ -296,7 +294,6 @@ class Worker(threading.Thread):
         rule = stage_rule(sid)
         restore = RESULT + r"\restore_stage%d.bin" % sid
         cmd = [HC, "-m", str(MODE), "-a", "0", "-w", "3",
-               "--backend-devices-keepfree=98",
                "--potfile-path", POT,
                "--session", "stage%d" % sid,
                "--restore-file-path", restore,

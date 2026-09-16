@@ -1,5 +1,7 @@
 # WiFi Cracker Progress
 
+> ⭐ **新對話先讀 [`KNOWN_GOOD.md`](KNOWN_GOOD.md)**：已實測「能抓包+能破解」的乾淨版本（base `628830b`）+ 走偏清單。本檔是完整歷程（很長），以 KNOWN_GOOD 為準。
+
 ## 📌 全局規則（一直有效）
 1. **遇到問題可以找 `subagent_codex` 幫忙** — 全局套用。任何卡住（Mac 驅動、抓包 0 幀、SIP/kext、hashcat 參數…）都可以直接丟給 Codex 子代理診斷/解，不必先問。
 1b. **調 codex 省 token**：給 `subagent_codex` 的 prompt 只放**核心任務目標 + 必要的關鍵限制**，剔除所有無用廢話/背景鋪陳。

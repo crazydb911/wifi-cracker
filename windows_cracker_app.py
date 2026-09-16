@@ -53,7 +53,6 @@ STATE = {
     "speed": None,
     "cracking": False,
     "attack_info": None,
-    "stopped": False,
 }
 
 def log(msg):
@@ -224,44 +223,34 @@ def notify_mac(password):
     except Exception as e:
         log(f"Mac notify error: {e}")
 
-def crack_hashes(hash_file, wordlist_key, rules_key=None, mode="0", mask=None, finalize=True):
+def crack_hashes(hash_file, wordlist_key, rules_key=None, mode="0", mask=None):
     STATE["status"] = "cracking"
     STATE["cracking"] = True
+    STATE["progress"] = 60
     wordlist = WORDLISTS.get(wordlist_key, wordlist_key)
     rules = RULES.get(rules_key) if rules_key else None
     info = f"mode={mode}, wordlist={wordlist_key}, rules={rules_key or 'none'}"
-    if finalize:
-        STATE["progress"] = 60
-        STATE["attack_info"] = info
+    STATE["attack_info"] = info
     log(f"Starting hashcat ({info})")
     try:
-        # 4090 @ user's 225W cap: -w 3 (EXTRA workload = max perf) +
-        # --backend-devices-keepfree=98 = the measured VRAM sweet spot (with the
-        # LLM ninefr/qwen3-27b holding ~21.6GB): hashcat gets ~599MB free VRAM
-        # at ~1063-1990 kH/s without OOMing the LLM. Higher keepfree starves
-        # hashcat (its free-VRAM budget drops to ~0); lower risks OOM on LLM
-        # inference spikes. No --hwmon-temp-abort (225W already caps the temp).
         cmd = [HASHCAT, "-m", "22000",
                "--self-test-disable", "--restore-disable",
-               "-w", "3",
-               "--backend-devices-keepfree=98",
+               f"--hwmon-temp-abort={TEMP_CRIT}", "-w", "2",
                "--potfile-path", POTFILE]
         if mode == "0":
             # Straight: wordlist (with optional rules)
             cmd.extend(["-a", "0", hash_file, wordlist])
             if rules:
                 cmd.extend(["-r", rules])
-        elif mode == "6":
-            # Hybrid: wordlist + mask suffix. -a 6 appends the mask to every
-            # wordlist word, catching the dominant WiFi pattern "word+digits"
-            # (e.g. dragon2024, password123). (The old -a 3 "hybrid" silently
-            # ignored the wordlist unless the mask carried a ?w token.)
-            cmd.extend(["-a", "6", hash_file, wordlist, mask or "?d?d?d?d"])
-        elif mode in ("3", "1", "mask"):
-            # Mask / brute-force: mask only, no wordlist. -a 1 = brute force,
-            # -a 3 = mask (equivalent for a bare mask).
-            a_flag = "1" if mode == "1" else "3"
-            cmd.extend(["-a", a_flag, hash_file, mask or "?d?d?d?d?d?d?d?d"])
+        elif mode == "3":
+            # Hybrid: wordlist + mask
+            cmd.extend(["-a", "3", hash_file, wordlist, mask or "?d?d?d?d?d?d?d?d"])
+        elif mode == "1":
+            # Brute force: mask only
+            cmd.extend(["-a", "3", hash_file, mask or "?d?d?d?d?d?d?d?d"])
+        elif mode == "mask":
+            # Mask attack: mask only (alias for 1)
+            cmd.extend(["-a", "3", hash_file, mask or "?d?d?d?d?d?d?d?d"])
         log(f"CMD: {' '.join(cmd)}")
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=HASHCAT_DIR)
         start_time = time.time()
@@ -307,91 +296,23 @@ def crack_hashes(hash_file, wordlist_key, rules_key=None, mode="0", mask=None, f
             for s in status_lines:
                 f.write(s + '\n')
         log(f"Hashcat log: {hc_log}")
-        if finalize:
-            results = STATE["results"]
-            if not results:
-                results.append("No match")
-            STATE["status"] = "cracked" if len(results) > 0 and results[0] != "No match" else "idle"
-            STATE["cracking"] = False
-            STATE["progress"] = 100
-            STATE["message"] = f"Done ({elapsed}s): {len(results)} result(s)"
-            log(f"Done in {elapsed}s: {results}")
-
-            # Notify Mac if cracked
-            if STATE["status"] == "cracked":
-                notify_mac(results[0])
-        else:
-            # Part of a multi-stage sequence: keep the cracking state so the
-            # caller (crack_receive_sequence) decides whether to continue.
-            STATE["cracking"] = True
-            STATE["status"] = "cracking"
+        results = STATE["results"]
+        if not results:
+            results.append("No match")
+        STATE["status"] = "cracked" if len(results) > 0 and results[0] != "No match" else "idle"
+        STATE["cracking"] = False
+        STATE["progress"] = 100
+        STATE["message"] = f"Done ({elapsed}s): {len(results)} result(s)"
+        log(f"Done in {elapsed}s: {results}")
+        
+        # Notify Mac if cracked
+        if STATE["status"] == "cracked":
+            notify_mac(results[0])
     except Exception as e:
-        if finalize:
-            STATE["status"] = "idle"
-            STATE["cracking"] = False
+        STATE["status"] = "idle"
+        STATE["cracking"] = False
         STATE["message"] = f"Crack error: {e}"
         log(f"Crack error: {e}")
-
-# Multi-stage attack sequence for Mac-received hashes (expert "start narrow,
-# then widen"): run several hashcat attacks in order, stopping as soon as one
-# cracks. rockyou+best66 catches weak passwords; the -a 6 hybrid stages catch
-# the dominant "word+digits" WiFi pattern (dragon2024, password123); the 8-digit
-# mask catches numeric/default passphrases; the dive stage widens rule coverage.
-RECEIVE_STAGES = [
-    # (wordlist_key, rules_key, mode, mask, label)  -- ordered FAST -> SLOW so the
-    # high-value, cheap stages run first; the exhaustive 140B 4-digit rockyou
-    # hybrid runs last (an over-night stage) and only if nothing earlier cracked.
-    ("rockyou", "best66", "0", None, "rockyou + best66 rules (quick wins)"),
-    ("rockyou", None, "6", "?d?d", "rockyou + 2-digit suffix (word24)"),
-    ("wifi_wordlist", None, "6", "?d?d?d?d", "wifi words + 4-digit suffix"),
-    (None, None, "3", "?d?d?d?d?d?d?d?d", "8-digit numeric (numeric-only password)"),
-    ("rockyou", "dive", "0", None, "rockyou + dive rules (leet/case variants)"),
-    ("rockyou", None, "6", "?d?d?d?d", "rockyou + 4-digit suffix (word2024) [over-night]"),
-]
-
-def crack_receive_sequence(hash_file):
-    """Run RECEIVE_STAGES in order; stop at the first stage that cracks."""
-    STATE["results"] = []
-    STATE["status"] = "cracking"
-    STATE["cracking"] = True
-    STATE["stopped"] = False
-    STATE["progress"] = 20
-    STATE["message"] = "Multi-stage: rockyou -> hybrid -> mask -> rules"
-    log("Starting multi-stage crack sequence")
-    n = len(RECEIVE_STAGES)
-    cracked_line = None
-    for i, (wl, rules, mode, mask, label) in enumerate(RECEIVE_STAGES):
-        if STATE["stopped"]:
-            log("Sequence stopped by user")
-            break
-        STATE["progress"] = int(20 + 80 * i / max(1, n - 1))
-        STATE["attack_info"] = f"[{i+1}/{n}] {label}"
-        log(f"[stage {i+1}/{n}] {label}")
-        crack_hashes(hash_file, wl, rules, mode, mask, finalize=False)
-        for r in STATE["results"]:
-            if re.match(r'^[0-9a-f]{64}:', r):
-                cracked_line = r
-                break
-        if cracked_line:
-            break
-    STATE["cracking"] = False
-    STATE["progress"] = 100
-    if cracked_line:
-        pw = cracked_line.split(":", 1)[1] if cracked_line.count(":") >= 1 else cracked_line
-        STATE["status"] = "cracked"
-        STATE["message"] = f"CRACKED: {pw}"
-        log(f"CRACKED: {cracked_line}")
-        notify_mac(cracked_line)
-    elif STATE["stopped"]:
-        STATE["status"] = "idle"
-        STATE["message"] = "Stopped"
-    else:
-        STATE["status"] = "idle"
-        if not STATE["results"]:
-            STATE["results"] = ["No match"]
-        STATE["message"] = f"Done: no match across {n} stages"
-        log(f"Sequence done: no match across {n} stages")
-
 
 @app.get("/")
 async def root():
@@ -522,19 +443,14 @@ async def api_receive_hash(request: Request):
     STATE["ssid"] = ssid
     STATE["status"] = "cracking"
     STATE["cracking"] = True
-    STATE["message"] = f"Cracking {ssid} with multi-stage (rockyou->hybrid->mask->rules)..."
-    STATE["progress"] = 20
-
-    # Best cracking strategy (expert "start narrow, then widen"): run a
-    # multi-stage sequence that stops on the first hit. Stage 1 rockyou+best66
-    # (~947M candidates at ~1990 kH/s, 2x faster and ~5000x more coverage than
-    # the 175k-word wifi_wordlist); the -a 6 hybrid stages then catch the
-    # dominant "word+digits" pattern (dragon2024, password123); the 8-digit
-    # mask catches numeric/default passphrases; the dive stage widens rules.
+    STATE["message"] = f"Cracking {ssid} with complex wordlist (1.4M)..."
+    STATE["progress"] = 60
+    
+    # Start cracking with complex wordlist (wifi_wordlist_combined.txt)
     threading.Thread(target=thermal_monitor, daemon=True).start()
-    threading.Thread(target=crack_receive_sequence, args=(hash_file,), daemon=True).start()
-
-    return JSONResponse({"ok": True, "message": "Hash received, running multi-stage crack"})
+    threading.Thread(target=crack_hashes, args=(hash_file, "wifi_wordlist", None, "0", None), daemon=True).start()
+    
+    return JSONResponse({"ok": True, "message": "Hash received, cracking with complex wordlist"})
 
 @app.post("/api/extract")
 async def api_extract(file: UploadFile = File(...), ssid: str = "32H9F_5G"):
@@ -560,7 +476,6 @@ async def api_crack(wordlist: str = "rockyou", rules: str = None, mode: str = "0
 async def api_stop():
     """Stop current cracking."""
     r = subprocess.run(['taskkill', '/F', '/IM', 'hashcat.exe'], capture_output=True, text=True)
-    STATE["stopped"] = True
     STATE["cracking"] = False
     STATE["status"] = "idle"
     STATE["message"] = "Stopped"
@@ -612,16 +527,9 @@ def crack_hashes_custom(hash_file, wordlist_path, rules_key, mode, mask):
     log(f"Starting hashcat custom ({info})")
     try:
         rules = RULES.get(rules_key) if rules_key else None
-        # 4090 @ user's 225W cap: -w 3 (EXTRA workload = max perf) +
-        # --backend-devices-keepfree=98 = the measured VRAM sweet spot (with the
-        # LLM ninefr/qwen3-27b holding ~21.6GB): hashcat gets ~599MB free VRAM
-        # at ~1063-1990 kH/s without OOMing the LLM. Higher keepfree starves
-        # hashcat (its free-VRAM budget drops to ~0); lower risks OOM on LLM
-        # inference spikes. No --hwmon-temp-abort (225W already caps the temp).
         cmd = [HASHCAT, "-m", "22000",
                "--self-test-disable", "--restore-disable",
-               "-w", "3",
-               "--backend-devices-keepfree=98",
+               f"--hwmon-temp-abort={TEMP_CRIT}", "-w", "2",
                "--potfile-path", POTFILE]
         if mode == "0":
             cmd.extend(["-a", "0", hash_file, wordlist_path])
