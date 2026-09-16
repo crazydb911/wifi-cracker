@@ -93,6 +93,8 @@ class MacCaptureApp:
         tk.Button(status, text='🔍 檢查', command=self.on_check_usb).pack(side='left', padx=8)
         self.scan_status = tk.Label(status, text='📡 開機中（VM 啟動 ~95s）...', fg='#0066cc', font=('', 10, 'bold'))
         self.scan_status.pack(side='left', padx=8)
+        self.result_label = tk.Label(status, text='📭 還沒抓過', fg='#555555', font=('', 10, 'bold'))
+        self.result_label.pack(side='left', padx=8)
 
         # ===== row 1: live Wi-Fi list (Treeview + scrollbar), expandable =====
         tree_frame = tk.Frame(root)
@@ -159,6 +161,11 @@ class MacCaptureApp:
 
         root.grid_columnconfigure(0, weight=1)
         root.grid_rowconfigure(1, weight=1)
+
+        # real-time USB / VM device status poller (starts from app open)
+        # — catches intermittent USB-adapter contact drops as live events.
+        self._last_vm = False
+        threading.Thread(target=self._status_loop, daemon=True).start()
 
         self.logline('就緒。DWA-160 要插在 Mac；開機後會自動掃 Wi-Fi，點一列即選、雙擊直接抓。')
         _files = local_hash_files()
@@ -233,13 +240,72 @@ class MacCaptureApp:
             self.logline('   🔍 USB 檢查: %s' % ('✅ DWA-160 已偵測' if found else '❌ 沒偵測到 DWA-160'))
         threading.Thread(target=_chk, daemon=True).start()
 
+    # ---------- real-time device status (USB presence + VM/wlan0 ready) ----------
+    def _set_device_status(self, usb, vm):
+        def _do():
+            if not usb:
+                self.usb_label.config(text='🔌 DWA-160: ❌ 掉線 / 沒在 Mac 上', fg='#b02020')
+            elif not vm:
+                self.usb_label.config(text='🔌 DWA-160: ✅ 在 | VM/wlan0: ⏳ 未就緒', fg='#b08000')
+            else:
+                self.usb_label.config(text='🔌 DWA-160: ✅ 在 | wlan0: ✅ 就緒', fg='#1a7f1a')
+        try:
+            self.root.after(0, _do)
+        except Exception:
+            pass
+
+    def _status_loop(self):
+        """Real-time USB presence (every ~5s; catches intermittent USB-adapter
+        contact drops) + VM/wlan0 ready (every ~15s). Logs drop/reconnect events
+        so a loose USB adapter is immediately visible, not silently stuck."""
+        prev_usb = None
+        n = 0
+        while not self._scan_stop.is_set():
+            try:
+                usb = self.check_usb()
+                if prev_usb is not None and usb != prev_usb:
+                    if usb:
+                        self.logline('🔌 DWA-160 重連（USB 接觸恢復）')
+                    else:
+                        self.logline('⚠️ DWA-160 掉線（USB 接觸不良？）— 檢查轉接器/換埠')
+                prev_usb = usb
+                if usb:
+                    if n % 3 == 0:
+                        self._last_vm = self.vm_ready(timeout=8)
+                    vm = self._last_vm
+                else:
+                    vm = False
+                    self._last_vm = False
+                self._set_device_status(usb, vm)
+            except Exception:
+                pass
+            n += 1
+            for _ in range(5):
+                if self._scan_stop.is_set():
+                    break
+                time.sleep(1)
+
+    def _set_result(self, n):
+        """Prominent last-capture outcome: >0 found / ==0 not captured / <0 failed."""
+        def _do():
+            if n < 0:
+                self.result_label.config(text='❌ 抓包失敗', fg='#b02020')
+            elif n > 0:
+                self.result_label.config(text='✅ 抓到 %d hash（已存本機+POST）' % n, fg='#1a7f1a')
+            else:
+                self.result_label.config(text='📭 沒抓到（0 hash）— 加秒數/換 channel 重試', fg='#b02020')
+        try:
+            self.root.after(0, _do)
+        except Exception:
+            pass
+
     # ---------- VM boot / ready ----------
-    def vm_ready(self):
+    def vm_ready(self, timeout=25):
         """wlan0 exists + firmware loaded (rt2870.bin)."""
         try:
             r = subprocess.run(
                 VM_SSH + ' "iw dev 2>/dev/null; echo ---DMESG---; dmesg 2>/dev/null | grep -i \'Firmware detected\' | tail -1"',
-                shell=True, capture_output=True, timeout=25)
+                shell=True, capture_output=True, timeout=timeout)
             out = (r.stdout or b'').decode('utf-8', 'replace')
             return ('wlan0' in out) and ('Firmware detected' in out)
         except Exception:
@@ -507,6 +573,7 @@ class MacCaptureApp:
                 for f in missing:
                     self.logline('❌ MISSING: %s' % f)
                 self.logline('   /tmp 可能被清掉了 → 重新 build VM。')
+                self._set_result(-1)
                 return
 
             if self.vm_ready():
@@ -579,6 +646,7 @@ class MacCaptureApp:
             self.logline('   抓到 %d 行 hash' % len(hash_lines))
             for h in hash_lines:
                 self.logline('   HASH: %s' % (h[:64] + ('...' if len(h) > 64 else '')))
+            self._set_result(len(hash_lines))
 
             self.logline('[4/5] 存本機 + POST ...')
             if hash_lines:
@@ -593,6 +661,7 @@ class MacCaptureApp:
             self.logline('=== 結束 ===')
         except Exception as e:
             self.logline('ERROR: %r' % e)
+            self._set_result(-1)
         finally:
             self.btn.config(state='normal')
             self._scan_paused.clear()  # resume scan
