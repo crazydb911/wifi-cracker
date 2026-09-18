@@ -23,6 +23,9 @@ rm -rf $B/irfs; mkdir -p $B/irfs
 ( cd $B/irfs && gunzip -c $B/boot/initramfs-lts | cpio -idm >/dev/null 2>&1 ) || { log "FAIL initramfs extract"; exit 1; }
 # macOS cpio drops most symlinks -> restore from archive with python parser
 /usr/bin/python3 /tmp/cpio_fixlinks.py $B/irfs $B/boot/initramfs-lts | tee -a /tmp/vmbuild/build.log
+rm -rf $B/modloop; mkdir -p $B/modloop
+/opt/homebrew/bin/unsquashfs -f -d $B/modloop $B/boot/modloop-lts >/dev/null 2>&1 || \
+  ( cd $B/modloop && ( /opt/homebrew/bin/zstd -dc $B/boot/modloop-lts 2>/dev/null || gunzip -c $B/boot/modloop-lts ) | cpio -idm >/dev/null 2>&1 ) || log "WARN modloop extract"
 if [ ! -d $B/modloop/modules ] && [ -f /tmp/vmbuild.tar ]; then
   mkdir -p $B/modloop && tar -xf /tmp/vmbuild.tar -C $B/modloop
   log "modloop extracted from /tmp/vmbuild.tar"
@@ -50,7 +53,8 @@ for d in \
   kernel/fs/jbd2 ; do
   SRC=$B/modloop/modules/$KV/$d
   [ -d "$SRC" ] || { log "WARN missing module dir $d"; continue; }
-  cp -R "$SRC" $MDEST/$d 2>/dev/null && log "modules ok: $d"
+  mkdir -p $MDEST/$(dirname $d)
+  cp -R "$SRC" $MDEST/$d 2>/dev/null && log "modules ok: $d" || log "WARN cp failed: $d"
 done
 for f in kernel/fs/mbcache.ko kernel/drivers/net/net_failover.ko; do
   SRC=$B/modloop/modules/$KV/$f
@@ -61,7 +65,7 @@ done
 # ---------- S3: apk payloads into initramfs ----------
 log "S3: extract apks (openssh/openssl/e2fsprogs) into initramfs"
 IDX=$(curl -s https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/ | grep -oE 'href="[^"]+\.apk"' | sed 's/href="//;s/"//')
-for want in openssh- openssh-client- openssh-server- openssl- libcrypto- libssl- e2fsprogs- libext2fs- libcom_err- apk-; do
+for want in openssh- openssh-client- openssh-server- openssl- e2fsprogs- e2fsprogs-libs- libcom_err- apk-; do
   f=$(echo "$IDX" | grep "^${want}" | grep "\.apk" | head -1)
   if [ "$want" = "apk-" ]; then f=$(echo "$IDX" | grep -E "^apk-[0-9]" | head -1); fi
   [ -z "$f" ] && { log "WARN apk not listed: $want"; continue; }
@@ -120,8 +124,10 @@ insmod $M/kernel/drivers/virtio/virtio_pci_modern_dev.ko 2>/dev/null
 insmod $M/kernel/drivers/virtio/virtio_pci_legacy_dev.ko 2>/dev/null
 insmod $M/kernel/drivers/virtio/virtio_pci.ko 2>/dev/null
 insmod $M/kernel/drivers/block/virtio_blk.ko 2>/dev/null
+insmod $M/kernel/net/core/failover.ko 2>/dev/null
 insmod $M/kernel/drivers/net/net_failover.ko 2>/dev/null
 insmod $M/kernel/drivers/net/virtio_net.ko 2>/dev/null
+insmod $M/kernel/lib/crc/crc16.ko 2>/dev/null
 insmod $M/kernel/fs/mbcache.ko 2>/dev/null
 insmod $M/kernel/fs/jbd2/jbd2.ko 2>/dev/null
 insmod $M/kernel/fs/ext4/ext4.ko 2>/dev/null
@@ -142,6 +148,7 @@ if [ -b /dev/vda ] && ! blkid /dev/vda >/dev/null 2>&1; then
   /sbin/mke2fs -t ext4 -F /dev/vda || mke2fs -t ext4 -F /dev/vda
 fi
 [ -b /dev/vda ] && mount -t ext4 /dev/vda /newroot 2>/dev/null
+
 # wifi driver: rebuild modules.dep, let modprobe resolve the ralink chain
 /tmp/depmod -a $KVER 2>&1 | head -2
 /tmp/modprobe rt2800usb 2>&1 | head -3
@@ -171,6 +178,9 @@ echo "nameserver 1.1.1.1" > /etc/resolv.conf 2>/dev/null
 # ssh host keys (initramfs copy)
 mkdir -p /var/empty
 chown 0:0 /var/empty 2>/dev/null; chmod 755 /var/empty 2>/dev/null
+chown 0:0 /root /root/.ssh /root/.ssh/authorized_keys 2>/dev/null
+chmod 700 /root/.ssh 2>/dev/null
+chmod 600 /root/.ssh/authorized_keys 2>/dev/null
 [ -f /etc/ssh/ssh_host_ed25519_key ] || ssh-keygen -A 2>&1 | head -3
 [ -x /usr/sbin/sshd ] && /usr/sbin/sshd -o "ListenAddress=0.0.0.0" -o "PermitRootLogin=yes" 2>&1 | head -5 &
 echo "initramfs sshd started"
@@ -210,7 +220,7 @@ nohup /opt/homebrew/bin/qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 409
   -display none -monitor unix:/tmp/vm_app_monitor.sock,server,nowait >/dev/null 2>&1 &
 log "qemu pid: $!"
 
-VSSH="ssh -i $HOME/.ssh/vm_tongbao -p 2222 -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o BatchMode=yes root@127.0.0.1"
+VSSH="ssh -i $HOME/.ssh/vm_tongbao -p 2222 -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes root@127.0.0.1"
 log "wait for VM ssh (build mode) ..."
 ok=0
 for i in $(seq 1 40); do
@@ -223,13 +233,14 @@ log "VM ssh OK: $($VSSH 'uname -r' 2>/dev/null)"
 # ---------- S6: build rootfs in VM ----------
 log "S6: populate rootfs (apk v3.24 main+community)"
 $VSSH 'set -e
-apk add --root=/newroot --initdb --arch=aarch64 \
-  -r https://dl-cdn.alpinelinux.org/alpine/v3.24/main -r https://dl-cdn.alpinelinux.org/alpine/v3.24/community \
-  base alpine-conf openssh openssh-server tcpdump aircrack-ng e2fsprogs build-base git libpcap-dev openssl-dev zlib-dev 2>&1 | tail -2
-echo ">>> apk done"' || { log "FAIL apk add"; exit 3; }
+apk add --root=/newroot --initdb --arch=aarch64 --allow-untrusted \
+  --repository https://dl-cdn.alpinelinux.org/alpine/v3.24/main --repository https://dl-cdn.alpinelinux.org/alpine/v3.24/community \
+  alpine-base alpine-conf openssh openssh-server tcpdump aircrack-ng e2fsprogs build-base git libpcap-dev openssl-dev zlib-dev iw > /tmp/apk.log 2>&1 || { tail -5 /tmp/apk.log; exit 91; }
+tail -2 /tmp/apk.log
+echo ">>> apk done"' || { log "FAIL apk add (rc=$?)"; exit 3; }
 log "hcxtools build in chroot"
 git clone -q https://github.com/ZerBea/hcxtools $B/hcxtools 2>/dev/null || git clone -q --depth 1 https://github.com/ZerBea/hcxtools $B/hcxtools
-tar -cf - -C $B/hcxtools . | $VSSH "mkdir -p /newroot/src && tar -xf - -C /newroot/src/hcxtools"
+tar -cf - -C $B/hcxtools . | $VSSH "mkdir -p /newroot/src/hcxtools && tar -xf - -C /newroot/src/hcxtools"
 $VSSH 'set -e
 chroot /newroot /bin/sh -c "cd /src/hcxtools && make -s -j2 2>&1 | tail -2; cp hcxpcapngtool /usr/local/bin/"
 chroot /newroot /usr/local/bin/hcxpcapngtool -h 2>&1 | head -1
@@ -238,10 +249,25 @@ log "firmware + ssh + password into newroot"
 $VSSH 'set -e
 mkdir -p /newroot/lib/firmware
 cp /lib/firmware/rt2870.bin /newroot/lib/firmware/ 2>/dev/null || true
+mkdir -p /newroot/usr/lib/firmware
+cp /lib/firmware/rt2870.bin /newroot/usr/lib/firmware/ 2>/dev/null || true
 mkdir -p /newroot/root/.ssh
 cp /root/.ssh/authorized_keys /newroot/root/.ssh/authorized_keys
 echo "root:alpine123" | chroot /newroot /usr/sbin/chpasswd
 chroot /newroot sh -c "ln -sf /usr/local/bin/hcxpcapngtool /usr/bin/hcxpcapngtool 2>/dev/null || true"
+ln -sf /bin/busybox /newroot/sbin/init
+# aircrack multicall symlinks (v3.24 package lacks airodump-ng/wpaclean/... entries)
+ln -sf /usr/sbin/airodump-ng /newroot/usr/bin/airodump-ng
+ln -sf /usr/sbin/aircrack-ng /newroot/usr/bin/aircrack-ng
+ln -sf /usr/sbin/aireplay-ng /newroot/usr/bin/aireplay-ng
+ln -sf /usr/sbin/airdecap-ng /newroot/usr/bin/airdecap-ng
+ln -sf /usr/sbin/wpaclean /newroot/usr/bin/wpaclean 2>/dev/null || ln -sf /usr/sbin/aircrack-ng /newroot/usr/bin/wpaclean
+ln -sf /usr/sbin/iw /newroot/usr/bin/iw
+# sshd-only runlevel (mdev/networking/services hang OpenRC)
+mkdir -p /newroot/etc/runlevels/default
+ln -sf ../init.d/sshd /newroot/etc/runlevels/default/sshd
+# silence getty respawn flood (no tty nodes in this kernel build)
+sed -i "s/^tty/#tty/" /newroot/etc/inittab 2>/dev/null || true
 touch /newroot/.build_done
 echo ">>> rootfs populated"' || { log "FAIL finalize"; exit 5; }
 $VSSH "sync; pkill -9 -f airod* 2>/dev/null; true" 

