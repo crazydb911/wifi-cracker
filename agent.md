@@ -4,8 +4,8 @@
 
 ## 一、核心需求（唯一目標）
 **抓到現用 WiFi `32H10F` 的密碼**（2.4G WPA2-Personal，AP BSSID `bc:3e:07:01:dc:98`，ch 1，已連線用戶端 `BC:61:93:23:BC:3F`）。
+- ✅ **已完成 (2026-09-21)**：32H10F = `0932153677`，32H9F = `0927450713`
 - 舊路由器的 `32H10F_5G`（BSSID `60:F8:1D:AD:01:E4`）hash 已破解完畢 = 無匹配，**不要再打它**。
-- 密碼出結果前，項目未完成。
 
 ## 一之補、App 功能需求（使用者 2026-07-18 明確指定，不可省略）
 **Mac 抓包 app（`mac_capture_app.py`）：**
@@ -36,12 +36,13 @@ Windows (192.168.1.107, RTX 4090)
 - 重建 Mac VM：`mac_vm_rebuild.sh`（scp 到 Mac `/tmp/vmbuild_rebuild.sh` 後跑）。
 
 ## 三、工作紀律（防走偏）
-1. **先查 KNOWN_GOOD.md §5「不要再做」清單**再動手：多階段重排、`-a 6`、把 `--backend-devices-keepfree=98` 當變更項、`-w 3`、wpa-sec、hcxdumptool 取 PMKID —— 全部已證偽。
+1. **先查 KNOWN_GOOD.md §5「不要再做」清單**再動手：多階段重排、`-a 6`、把 `--backend-devices-keepfree=98` 當變更項、`-w 3`、wpa-sec —— 全部已證偽。hcxdumptool PMKID 已升級為正式路線（2026-09-20 驗證成功）。
 2. **每次只改一個變量**，改完驗證（runner VM 或完整 build），再改下一個。
 3. **優化建議只列清單，逐項經使用者確認才執行**；管線本身的變更（含腳本參數）先報告再動手。
 4. **用中文回報**；`ask_user_question` 能不用就不用（使用者常不在）。
 5. GPU 電源由使用者管理，不要開關；hashcat 階段跑完就停（溫控 90-92°C 會自動中斷，屬正常）。
 6. 手機 adb（Xiaomi 11T, 24d165c4）目前不用。
+7. **遇到問題優先搜尋大神解法**（web search / GitHub issues / 論壇），寫進 `MAC_HEADLESS.md` 知識庫。
 
 ## 四、環境快參
 | 機器 | 存取 |
