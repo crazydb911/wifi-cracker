@@ -223,7 +223,17 @@ def notify_mac(password):
     except Exception as e:
         log(f"Mac notify error: {e}")
 
+def kill_orphan_hashcat():
+    """Kill leftover hashcat instances so a new one can start (GPU lock)."""
+    try:
+        subprocess.run('taskkill /F /IM hashcat.exe', shell=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+    time.sleep(1)
+
 def crack_hashes(hash_file, wordlist_key, rules_key=None, mode="0", mask=None):
+    """Run a single hashcat stage. Returns True if a password was found."""
     STATE["status"] = "cracking"
     STATE["cracking"] = True
     STATE["progress"] = 60
@@ -238,21 +248,17 @@ def crack_hashes(hash_file, wordlist_key, rules_key=None, mode="0", mask=None):
                f"--hwmon-temp-abort={TEMP_CRIT}", "-w", "2",
                "--potfile-path", POTFILE]
         if mode == "0":
-            # Straight: wordlist (with optional rules)
             cmd.extend(["-a", "0", hash_file, wordlist])
             if rules:
                 cmd.extend(["-r", rules])
         elif mode == "3":
-            # Hybrid: wordlist + mask
             cmd.extend(["-a", "3", hash_file, wordlist, mask or "?d?d?d?d?d?d?d?d"])
-        elif mode == "1":
-            # Brute force: mask only
-            cmd.extend(["-a", "3", hash_file, mask or "?d?d?d?d?d?d?d?d"])
-        elif mode == "mask":
-            # Mask attack: mask only (alias for 1)
+        elif mode in ("1", "mask"):
             cmd.extend(["-a", "3", hash_file, mask or "?d?d?d?d?d?d?d?d"])
         log(f"CMD: {' '.join(cmd)}")
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=HASHCAT_DIR)
+        kill_orphan_hashcat()
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, encoding='utf-8', errors='ignore', cwd=HASHCAT_DIR)
         start_time = time.time()
         last_log = 0
         speed_lines = []
@@ -261,15 +267,15 @@ def crack_hashes(hash_file, wordlist_key, rules_key=None, mode="0", mask=None):
             line = line.strip()
             if not line:
                 continue
-            # Log progress every 15s
             now = time.time()
             if now - last_log > 15:
                 last_log = now
                 elapsed = int(now - start_time)
                 STATE["message"] = f"Cracking... ({elapsed}s)"
                 log(f"[{elapsed}s] {line[:150]}")
-            # Collect metrics
-            if re.match(r'^[0-9a-f]{64}:', line):
+            # hashcat -m 22000 outputs PMKID (32 chars) + colons for WPA*02,
+            # or PMK (64 chars) for WPA*01. Match both.
+            if re.match(r'^[0-9a-f]{32,64}:', line):
                 STATE["results"].append(line)
                 log(f"CRACKED: {line}")
             if 'Speed' in line and ('MH/s' in line or 'kH/s' in line):
@@ -284,7 +290,6 @@ def crack_hashes(hash_file, wordlist_key, rules_key=None, mode="0", mask=None):
                 log(f"REJECTED: {line}")
         proc.wait()
         elapsed = int(time.time() - start_time)
-        # Save full hashcat output to file
         hc_log = os.path.join(LOG_DIR, f"hashcat_{int(start_time)}.log")
         with open(hc_log, 'w', encoding='utf-8') as f:
             f.write(f"Command: {' '.join(cmd)}\n")
@@ -299,20 +304,86 @@ def crack_hashes(hash_file, wordlist_key, rules_key=None, mode="0", mask=None):
         results = STATE["results"]
         if not results:
             results.append("No match")
-        STATE["status"] = "cracked" if len(results) > 0 and results[0] != "No match" else "idle"
+        found = len(results) > 0 and results[0] != "No match"
         STATE["cracking"] = False
         STATE["progress"] = 100
         STATE["message"] = f"Done ({elapsed}s): {len(results)} result(s)"
         log(f"Done in {elapsed}s: {results}")
-        
-        # Notify Mac if cracked
-        if STATE["status"] == "cracked":
+        if found:
+            STATE["status"] = "cracked"
             notify_mac(results[0])
+            return True
+        else:
+            STATE["status"] = "idle"
+            return False
     except Exception as e:
         STATE["status"] = "idle"
         STATE["cracking"] = False
         STATE["message"] = f"Crack error: {e}"
         log(f"Crack error: {e}")
+        return False
+
+
+# Multi-stage auto-escalation sequence
+STAGES = [
+    {"name": "wifi_wordlist straight", "wordlist": "wifi_wordlist", "rules": None, "mask": None, "mode": "0"},
+    {"name": "rockyou plain", "wordlist": "rockyou", "rules": None, "mask": None, "mode": "0"},
+    {"name": "rockyou + best66", "wordlist": "rockyou", "rules": "best66", "mask": None, "mode": "0"},
+    {"name": "mask ?d x10", "wordlist": None, "rules": None, "mask": "?d?d?d?d?d?d?d?d?d?d", "mode": "mask"},
+]
+
+def lookup_potfile(ssid_hex):
+    """Look up password in potfile by SSID hex.
+    Potfile format: <hash>*<SSID_HEX>:<password>
+    Returns password string or None.
+    """
+    try:
+        if not os.path.exists(POTFILE):
+            return None
+        want = ssid_hex.upper() if ssid_hex else None
+        with open(POTFILE, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line or '*' not in line:
+                    continue
+                # format: <hash>*<SSID_HEX>:<password>
+                rest = line.split('*', 1)[1]
+                if ':' in rest:
+                    s_hex, password = rest.split(':', 1)
+                    if s_hex.strip().upper() == want:
+                        return password.strip()
+    except Exception as e:
+        log(f"potfile lookup error: {e}")
+    return None
+
+
+def multi_stage_crack(hash_file, ssid):
+    """Run bounded stages (no infinite stage). Returns immediately if potfile has answer."""
+    threading.Thread(target=thermal_monitor, daemon=True).start()
+    total = len(STAGES)
+    for i, stage in enumerate(STAGES):
+        if STATE["status"] == "cracked":
+            break
+        STATE["status"] = "cracking"
+        STATE["cracking"] = True
+        STATE["progress"] = int((i / total) * 100)
+        STATE["message"] = f"[{i+1}/{total}] {stage['name']}..."
+        log(f"[stage {i+1}/{total}] {stage['name']}")
+        found = crack_hashes(
+            hash_file,
+            stage["wordlist"] or "rockyou",
+            stage["rules"],
+            stage["mode"],
+            stage["mask"]
+        )
+        if found:
+            log(f"🎉 Password found at stage {i+1}: {stage['name']}")
+            break
+    if STATE["status"] != "cracked":
+        STATE["status"] = "done"
+        STATE["message"] = f"All {total} stages exhausted: no match"
+        log(f"All stages done, no match for {ssid}")
+    kill_orphan_hashcat()
 
 @app.get("/")
 async def root():
@@ -421,7 +492,7 @@ async def get_state():
 
 @app.post("/api/receive-hash")
 async def api_receive_hash(request: Request):
-    """Receive hash from Mac for complex wordlist cracking."""
+    """Receive hash from Mac, start multi-stage auto-escalation cracking."""
     data = await request.json()
     hash_str = data.get("hash")
     ssid = data.get("ssid")
@@ -431,26 +502,42 @@ async def api_receive_hash(request: Request):
         return JSONResponse({"ok": False, "error": "No hash"})
     
     log(f"Received hash from Mac: SSID={ssid}, BSSID={bssid}")
-    log(f"Hash: {hash_str[:50]}...")
+    log(f"Hash lines: {len(hash_str.splitlines())}")
+    log(f"Hash: {hash_str[:80]}...")
+    
+    # Parse SSID_HEX from hash (WPA*02*PMKID*BSSID*CLIENT*SSID_HEX*PMK*...)
+    hash_fields = hash_str.split('*')
+    ssid_hex = hash_fields[5].strip() if len(hash_fields) > 5 else None
+    if ssid_hex:
+        ssid_hex = ssid_hex.upper()
     
     # Save hash to file
     hash_file = os.path.join(UPLOAD_DIR, f"hash_{int(time.time())}.hc22000")
     with open(hash_file, 'w') as f:
         f.write(hash_str + '\n')
     
-    STATE["hash_file"] = hash_file
-    STATE["hash_count"] = 1
-    STATE["ssid"] = ssid
+    # Try potfile first (instant answer)
+    password = lookup_potfile(ssid_hex)
+    if password:
+        STATE["status"] = "cracked"
+        STATE["cracking"] = False
+        STATE["results"] = [f"{ssid}: {password}"]
+        STATE["progress"] = 100
+        STATE["message"] = f"Found in potfile: {password}"
+        STATE["attack_info"] = "potfile"
+        log(f"✅ INSTANT: {ssid} = {password} (from potfile)")
+        return JSONResponse({"ok": True, "password": password, "source": "potfile", "ssid": ssid})
+    
+    # Not in potfile -> run bounded multi-stage crack
     STATE["status"] = "cracking"
     STATE["cracking"] = True
-    STATE["message"] = f"Cracking {ssid} with complex wordlist (1.4M)..."
-    STATE["progress"] = 60
+    STATE["results"] = []
+    STATE["message"] = f"Cracking {ssid}: {len(STAGES)}-stage (not in potfile)..."
+    STATE["progress"] = 5
     
-    # Start cracking with complex wordlist (wifi_wordlist_combined.txt)
-    threading.Thread(target=thermal_monitor, daemon=True).start()
-    threading.Thread(target=crack_hashes, args=(hash_file, "wifi_wordlist", None, "0", None), daemon=True).start()
+    threading.Thread(target=multi_stage_crack, args=(hash_file, ssid), daemon=True).start()
     
-    return JSONResponse({"ok": True, "message": "Hash received, cracking with complex wordlist"})
+    return JSONResponse({"ok": True, "message": f"Hash received, running {len(STAGES)}-stage crack"})
 
 @app.post("/api/extract")
 async def api_extract(file: UploadFile = File(...), ssid: str = "32H9F_5G"):
@@ -538,7 +625,9 @@ def crack_hashes_custom(hash_file, wordlist_path, rules_key, mode, mask):
         elif mode in ("3", "1", "mask"):
             cmd.extend(["-a", "3", hash_file, wordlist_path, mask or "?d?d?d?d?d?d?d?d"])
         log(f"CMD: {' '.join(cmd)}")
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=HASHCAT_DIR)
+        kill_orphan_hashcat()
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, encoding='utf-8', errors='ignore', cwd=HASHCAT_DIR)
         start_time = time.time()
         last_log = 0
         for line in proc.stdout:
@@ -551,7 +640,9 @@ def crack_hashes_custom(hash_file, wordlist_path, rules_key, mode, mask):
                 elapsed = int(now - start_time)
                 STATE["message"] = f"Cracking... ({elapsed}s)"
                 log(f"[{elapsed}s] {line[:150]}")
-            if re.match(r'^[0-9a-f]{64}:', line):
+            # hashcat -m 22000 outputs PMKID (32 chars) + colons for WPA*02,
+            # or PMK (64 chars) for WPA*01. Match both.
+            if re.match(r'^[0-9a-f]{32,64}:', line):
                 STATE["results"].append(line)
                 log(f"CRACKED: {line}")
             if 'Speed' in line and ('MH/s' in line or 'kH/s' in line):
