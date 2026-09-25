@@ -49,9 +49,9 @@ C_ACC     = '#3b82f6'   # blue
 C_GREEN   = '#22c55e'
 C_RED     = '#ef4444'
 C_AMBER   = '#f59e0b'
-FONT      = ('-apple-system', 12)
-FONT_B    = ('-apple-system', 12, 'bold')
-FONT_H    = ('-apple-system', 18, 'bold')
+FONT      = ('Helvetica', 12)
+FONT_B    = ('Helvetica', 12, 'bold')
+FONT_H    = ('Helvetica', 18, 'bold')
 FONT_MONO = ('Menlo', 11)
 FONT_PASS = ('Menlo', 20, 'bold')
 
@@ -80,6 +80,38 @@ class App:
         threading.Thread(target=self._scan_loop, daemon=True).start()
         self._log('就緒。自動掃描中 — 在左邊選一台 Wi-Fi 就會自動開始。')
         self._startup_vm()
+
+
+    def _ui_selfcheck(self):
+        try:
+            import time as _t
+            from tkinter import font as tkfont
+            lines = []
+            self.root.update_idletasks()
+            w = self.root.winfo_width(); h = self.root.winfo_height()
+            mapped = self.root.state()
+            lines.append("geom=%dx%d state=%s" % (w, h, mapped))
+            for name, f in (("FONT", FONT), ("FONT_B", FONT_B), ("FONT_H", FONT_H)):
+                try:
+                    m = tkfont.Font(font=f).measure("WiFi破解台1234567890")
+                    lines.append("%s_measure=%d" % (name, m))
+                except Exception as e:
+                    lines.append("%s_err=%s" % (name, e))
+            try:
+                n = len(self.tree.get_children())
+                first = self.tree.item(self.tree.get_children()[0]) if n else {}
+                lines.append("tree_items=%d first_ssid=%r" % (n, first.get('values', ('',))[0] if n else ''))
+            except Exception as e:
+                lines.append("tree_err=%s" % e)
+            try:
+                lines.append("target=%r phase=%s aps=%d" % (self.target, self.phase[0] if self.phase else '?', len(self.aps)))
+            except Exception:
+                pass
+            lines.append("t=%s" % _t.strftime("%H:%M:%S"))
+            NL = chr(10)
+            open("/tmp/mac_wifi_ui.txt", "w").write(NL.join(lines) + NL)
+        except Exception:
+            pass
 
     # ================= UI =================
     def _build(self):
@@ -241,10 +273,17 @@ class App:
 
     def _log(self, msg):
         def _do():
-            self.log.config(state='normal')
-            self.log.insert('end', time.strftime('%H:%M:%S ') + msg + '\n')
-            self.log.see('end')
-            self.log.config(state='disabled')
+            try:
+                self.log.config(state='normal')
+                self.log.insert('end', time.strftime('%H:%M:%S ') + msg + '\n')
+                self.log.see('end')
+                self.log.config(state='disabled')
+            except Exception as _e:
+                try:
+                    open('/tmp/mac_wifi_ui_err.txt', 'a').write(repr(_e) + NL)
+                except Exception:
+                    pass
+            self._ui_selfcheck()
         self._ui(_do)
 
     # ================= USB / VM =================
@@ -376,6 +415,7 @@ class App:
                 for a in aps[:20]:
                     f.write('  ' + str(a[0]) + ' ' + str(a[1]) + ' ch' + str(a[2]) + ' ' + str(a[3]) + '\n')
             self.aps = aps
+            self._log('scan parsed %d aps' % len(aps))
             self._refresh_tree()
             self._ui(lambda: self.lbl_scan.config(
                 text='📡 %s · %d AP' % (time.strftime('%H:%M:%S'), len(aps)),
