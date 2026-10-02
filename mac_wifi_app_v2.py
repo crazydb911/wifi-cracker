@@ -86,8 +86,11 @@ class App:
         try:
             import time as _t
             from tkinter import font as tkfont
+            _now = _t.time()
+            if getattr(self, '_sc_last', 0) and _now - self._sc_last < 10:
+                return
+            self._sc_last = _now
             lines = []
-            self.root.update_idletasks()
             w = self.root.winfo_width(); h = self.root.winfo_height()
             mapped = self.root.state()
             lines.append("geom=%dx%d state=%s" % (w, h, mapped))
@@ -247,7 +250,7 @@ class App:
                 txt, col = '●  ' + self.phase[1], C_ACC
             else:
                 txt, col = '○  ' + self._phase_name(k), C_DIM
-            self._ui(lambda: self.phases[k].config(text=txt, fg=col))
+            self._ui(lambda: self._set_text(self.phases[k], txt, col))
 
     def _phase_name(self, k):
         return {'scan': '選定', 'cap': '抓包', 'conv': '轉 hash + 送 Windows',
@@ -258,13 +261,37 @@ class App:
         if hasattr(self, 'phases'):
             self._ui(lambda: self.phases.get(key, tk.Label()).config(fg=C_ACC))
         if sub:
-            self._ui(lambda: self.phases[key + '_sub'].config(text=sub))
+            self._ui(lambda: self._set_text(self.phases[key + '_sub'], sub))
         self._log('[%s] %s' % (self._phase_name(key), sub or text))
 
     def _result(self, text, color):
-        self._ui(lambda: self.lbl_result.config(text=text, fg=color))
+        self._ui(lambda: self._set_text(self.lbl_result, text, color))
 
     # ================= UI thread helpers =================
+    def _set_text(self, w, text, color=None):
+
+        try:
+
+            if text == getattr(w, '_last_text', None):
+
+                return
+
+            w._last_text = text
+
+            if color is not None:
+
+                w.config(text=text, fg=color)
+
+            else:
+
+                w.config(text=text)
+
+        except Exception:
+
+            pass
+
+
+
     def _ui(self, fn):
         try:
             self.root.after(0, fn)
@@ -276,6 +303,11 @@ class App:
             try:
                 self.log.config(state='normal')
                 self.log.insert('end', time.strftime('%H:%M:%S ') + msg + '\n')
+                try:
+                    if int(self.log.index('end-1c').split('.')[0]) > 400:
+                        self.log.delete('1.0', '100.0')
+                except Exception:
+                    pass
                 self.log.see('end')
                 self.log.config(state='disabled')
             except Exception as _e:
@@ -300,8 +332,8 @@ class App:
             else:
                 tu, cu = '🔌 DWA-160 網卡：❌ 未偵測到（請插入）', C_RED
                 tv, cv = '📶 VM wlan0：—', C_DIM
-            self._ui(lambda: self.card_usb.config(text=tu, fg=cu))
-            self._ui(lambda: self.card_vm.config(text=tv, fg=cv))
+            self._ui(lambda: self._set_text(self.card_usb, tu, cu))
+            self._ui(lambda: self._set_text(self.card_vm, tv, cv))
             for _ in range(5):
                 if self._stop.is_set():
                     return
@@ -350,7 +382,7 @@ class App:
             pass
         time.sleep(2)
         os.system('rm -f %s %s' % (SERIAL_LOG, MON_SOCK))
-        cmd = ('%s -machine virt -cpu cortex-a72 -m 2048 -smp 4 '
+        cmd = ('%s -machine virt -cpu cortex-a72 -m 1024 -smp 2 '
                '-drive file=%s,format=qcow2 '
                '-kernel %s -initrd %s -append "console=ttyAMA0" '
                '-chardev file,id=s0,path=%s,append=on -serial chardev:s0 '
@@ -392,7 +424,7 @@ class App:
 
     def _scan_now(self):
         if not self.vm_ready(timeout=8):
-            self._ui(lambda: self.lbl_scan.config(text='⏳ VM 未就緒', fg=C_AMBER))
+            self._ui(lambda: self._set_text(self.lbl_scan, '⏳ VM 未就緒', C_AMBER))
             return
         script = (BIND +
                   CH + 'ifconfig wlan0 down 2>/dev/null\n' +
@@ -421,7 +453,7 @@ class App:
                 text='📡 %s · %d AP' % (time.strftime('%H:%M:%S'), len(aps)),
                 fg=C_GREEN if aps else C_AMBER))
         except Exception as e:
-            self._ui(lambda: self.lbl_scan.config(text='⚠️ scan 失敗', fg=C_RED))
+            self._ui(lambda: self._set_text(self.lbl_scan, '⚠️ scan 失敗', C_RED))
 
     @staticmethod
     def _parse_scan(out):
@@ -459,6 +491,9 @@ class App:
 
 
     def _refresh_tree(self):
+        if list(self.aps) == getattr(self, '_last_aps', None):
+            return
+        self._last_aps = list(self.aps)
         def _do():
             self.tree.delete(*self.tree.get_children())
             for ssid, bssid, ch, sig in self.aps:
@@ -660,7 +695,7 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                 if msg and msg != last:
                     last = msg
                     self._log('   Windows: %s' % msg)
-                    self._ui(lambda m=msg: self.phases['crack_sub'].config(text=m))
+                    self._ui(lambda m=msg: self._set_text(self.phases['crack_sub'], m))
                 if status in ('done', 'cracked', 'idle'):
                     for r in d.get('results', []):
                         if r and r != 'No match':
