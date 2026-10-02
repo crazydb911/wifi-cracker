@@ -430,10 +430,10 @@ class App:
                   CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                   CH + 'iw dev wlan0 set type monitor 2>/dev/null\n' +
                   CH + 'ifconfig wlan0 up 2>/dev/null\nsleep 1\n' +
-                  'for ch in 1 6 11 36; do\n' +
+                  'for ch in 1 6 11; do\n' +
                   CH + '  /usr/sbin/iw dev wlan0 set channel $ch 2>/dev/null\n' +
                   CH + '  rm -f /tmp/bc_$ch.pcap\n' +
-                  CH + '  timeout 6 /usr/bin/tcpdump -i wlan0 -s 160 -w /tmp/bc_$ch.pcap 2>/dev/null\n' +
+                  CH + '  timeout 5 /usr/bin/tcpdump -i wlan0 -s 160 -w /tmp/bc_$ch.pcap 2>/dev/null\n' +
                   '  echo "MARK:$ch"\n' +
                   CH + '  /usr/bin/tcpdump -r /tmp/bc_$ch.pcap -e -n 2>/dev/null\n' +
                   'done\n')
