@@ -10,7 +10,7 @@ mac_wifi_app_v2.py — 一選就跑
 """
 import tkinter as tk
 from tkinter import ttk
-import subprocess, threading, time, json, re, os, urllib.request
+import subprocess, threading, time, json, re, os, urllib.request, signal
 
 # ---------------- fixed paths (Mac side) ----------------
 QEMU_BIN = '/opt/homebrew/bin/qemu-system-aarch64'
@@ -79,6 +79,10 @@ class App:
         threading.Thread(target=self._usb_vm_loop, daemon=True).start()
         threading.Thread(target=self._scan_loop, daemon=True).start()
         self._log('就緒。自動掃描中 — 在左邊選一台 Wi-Fi 就會自動開始。')
+        signal.signal(signal.SIGUSR1, self._lift)
+
+        self.root.after(800, self._lift)
+
         self._startup_vm()
 
 
@@ -268,6 +272,30 @@ class App:
         self._ui(lambda: self._set_text(self.lbl_result, text, color))
 
     # ================= UI thread helpers =================
+    def _lift(self, *_):
+
+        def _do():
+
+            try:
+
+                self.root.deiconify()
+
+                self.root.attributes('-topmost', True)
+
+                self.root.lift()
+
+                self.root.focus_force()
+
+                self.root.after(2000, lambda: self.root.attributes('-topmost', False))
+
+            except Exception:
+
+                pass
+
+        self._ui(_do)
+
+
+
     def _set_text(self, w, text, color=None):
 
         try:
@@ -412,10 +440,20 @@ class App:
 
     # ================= scan =================
     def _scan_loop(self):
+        miss = 0
         while not self._stop.is_set():
             if self._running.is_set():
                 time.sleep(3)
                 continue
+            if not self.vm_ready(timeout=8):
+                miss += 1
+                if miss >= 3:
+                    miss = 0
+                    self._log('VM 失聯 → 自動重啟')
+                    self.boot_vm_if_needed()
+                time.sleep(5)
+                continue
+            miss = 0
             self._scan_now()
             for _ in range(6):
                 if self._stop.is_set():
