@@ -14,14 +14,19 @@
 | 疑似控制鏈 | `~/.m2control`、`~/.modloop`、`~/.claude-server-commander*` | ⚠️ 執行前跟女友確認 |
 | Homebrew + node | `/opt/homebrew` | desktop-commander 相依，**不能砍** |
 
-## ❌ 清除（WiFi 破解相關，共約 2.7GB）
-- [ ] `~/vmbuild/`（2.7G：Alpine rootfs、kernel、initrd）
-- [ ] `~/wifi_cracker/`（2.9M：mac_wifi_app_v2.py 等）
-- [ ] `~/Desktop/MacCapture.app`
+## ✅ 保留（破解 App 功能與程式，2026-10 決定）
+| 項目 | 位置 | 說明 |
+|---|---|---|
+| App 圖示 | `~/Desktop/MacCapture.app` | 雙擊即開（無自動啟動） |
+| 程式 | `~/wifi_cracker/mac_wifi_app_v2.py` | 中文版 |
+| 虛擬機檔 | `~/vmbuild/`（2.7G） | 抓包必需（Alpine+kernel+initrd） |
+| QEMU | brew 的 qemu | App 啟動虛擬機要用 |
+| VM 金鑰 | `~/.ssh/vm_tongbao` | App 連虛擬機用 |
+> 注意：破解仍需要 Windows 那台開著 :8766 才出密碼；Mac 端只抓包。
+
+## ❌ 清除（只剩除錯殘留與垃圾）
 - [ ] `~/MacCapture/`（0B 殘留）
-- [ ] `~/.ssh/vm_tongbao`、`vm_tongbao.pub`（VM 金鑰）
-- [ ] `/tmp/mac_wifi_*`、`/tmp/vm_app_*`、`/tmp/_win.scpt`
-- [ ] `brew uninstall qemu`（含 pixman 等相依）
+- [ ] `/tmp/mac_wifi_*`、`/tmp/vm_app_*`、`/tmp/_win.scpt`、`/tmp/_tkt*`
 - [ ] `pip3 uninstall py-spy`（我裝的除錯工具）
 
 ## ❌ 恢復系統設定（我改過的）
