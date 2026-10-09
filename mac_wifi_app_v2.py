@@ -133,19 +133,19 @@ class App:
                                  background=C_BG)
         self.lbl_wip.pack(side='left', padx=16)
         # status cards: USB 網卡 + VM 介面
-        self.card_usb = tk.Label(top, text='🔌 DWA-160 網卡：檢查中…', font=FONT_B,
+        self.card_usb = tk.Label(top, text='🔌 抓包網卡：檢查中…', font=FONT_B,
                                  bg='#1e2534', fg=C_DIM, padx=14, pady=6,
                                  anchor='w', relief='flat')
         self.card_usb.pack(side='left', padx=(14, 4))
-        self.card_vm = tk.Label(top, text='📶 VM wlan0：檢查中…', font=FONT_B,
+        self.card_vm = tk.Label(top, text='📶 掃描引擎：檢查中…', font=FONT_B,
                                 bg='#1e2534', fg=C_DIM, padx=14, pady=6,
                                 anchor='w', relief='flat')
         self.card_vm.pack(side='left', padx=4)
-        ttk.Label(top, text='Windows', font=FONT, foreground=C_DIM,
+        ttk.Label(top, text='Windows 電腦', font=FONT, foreground=C_DIM,
                   background=C_BG).pack(side='left')
         ttk.Entry(top, textvariable=self.var['wip'], width=14,
                   font=FONT_MONO).pack(side='left', padx=(6, 12))
-        ttk.Label(top, text='port', font=FONT, foreground=C_DIM,
+        ttk.Label(top, text='連接埠', font=FONT, foreground=C_DIM,
                   background=C_BG).pack(side='left')
         ttk.Entry(top, textvariable=self.var['port'], width=6,
                   font=FONT_MONO).pack(side='left', padx=(6, 12))
@@ -178,8 +178,8 @@ class App:
                   activebackground=C_CARD_HI).pack(side='right')
         self.tree = ttk.Treeview(left, columns=('ssid', 'ch', 'sig'),
                                  show='headings', selectmode='browse')
-        self.tree.heading('ssid', text='SSID')
-        self.tree.heading('ch', text='Ch')
+        self.tree.heading('ssid', text='網路名稱')
+        self.tree.heading('ch', text='頻道')
         self.tree.heading('sig', text='訊號')
         self.tree.column('ssid', anchor='w', stretch=True)
         self.tree.column('ch', width=42, anchor='center', stretch=False)
@@ -214,7 +214,7 @@ class App:
         # phase list
         self.phases = {}
         for key, name in [('scan', '1 · 選定'), ('cap', '2 · 抓包'),
-                          ('conv', '3 · 轉 hash + 送 Windows'),
+                          ('conv', '3 · 轉換握手包 + 上傳'),
                           ('crack', '4 · Windows 破解中')]:
             row = tk.Frame(mid, bg=C_PANEL)
             row.pack(fill='x', padx=10, pady=2)
@@ -257,7 +257,7 @@ class App:
             self._ui(lambda: self._set_text(self.phases[k], txt, col))
 
     def _phase_name(self, k):
-        return {'scan': '選定', 'cap': '抓包', 'conv': '轉 hash + 送 Windows',
+        return {'scan': '選定', 'cap': '抓包', 'conv': '轉換握手包 + 上傳',
                 'crack': 'Windows 破解中'}.get(k, k)
 
     def set_phase(self, key, text, sub=''):
@@ -352,14 +352,14 @@ class App:
             usb = self._check_usb()
             vm = self.vm_ready(timeout=8) if usb else False
             if usb and vm:
-                tu, cu = '🔌 DWA-160 網卡：✅ 已連線', C_GREEN
-                tv, cv = '📶 VM wlan0：✅ 就緒', C_GREEN
+                tu, cu = '🔌 抓包網卡：✅ 已連線', C_GREEN
+                tv, cv = '📶 掃描引擎：✅ 就緒', C_GREEN
             elif usb:
-                tu, cu = '🔌 DWA-160 網卡：✅ 已連線', C_GREEN
-                tv, cv = '📶 VM wlan0：⏳ 啟動中…', C_AMBER
+                tu, cu = '🔌 抓包網卡：✅ 已連線', C_GREEN
+                tv, cv = '📶 掃描引擎：⏳ 啟動中…', C_AMBER
             else:
-                tu, cu = '🔌 DWA-160 網卡：❌ 未偵測到（請插入）', C_RED
-                tv, cv = '📶 VM wlan0：—', C_DIM
+                tu, cu = '🔌 抓包網卡：❌ 未偵測到（請插入）', C_RED
+                tv, cv = '📶 掃描引擎：—', C_DIM
             self._ui(lambda: self._set_text(self.card_usb, tu, cu))
             self._ui(lambda: self._set_text(self.card_vm, tv, cv))
             for _ in range(5):
@@ -396,9 +396,9 @@ class App:
 
     def _startup_vm(self):
         if self.vm_ready(timeout=10):
-            self._log('✅ VM 已就緒（沿用）')
+            self._log('✅ 虛擬機已就緒（沿用）')
             return
-        self._log('⏳ 啟動 VM（QEMU + DWA-160）...')
+        self._log('⏳ 啟動虛擬機（抓包網卡）...')
         missing = [f for f in (QEMU_BIN, QCOW2, KERNEL, INITRD, SSH_KEY)
                    if not os.path.exists(f)]
         if missing:
@@ -426,15 +426,15 @@ class App:
             if self._stop.is_set():
                 return
             if self.vm_ready(timeout=8):
-                self._log('✅ VM 就緒')
+                self._log('✅ 虛擬機就緒')
                 return
             time.sleep(3)
-        self._log('⚠️ VM 逾時（繼續，之後每輪重試）')
+        self._log('⚠️ 虛擬機啟動逾時（之後每輪重試）')
 
     def boot_vm_if_needed(self):
         if self.vm_ready(timeout=12):
             return True
-        self._log('VM 不在 → 重啟 ...')
+        self._log('虛擬機不在 → 重啟 ...')
         self._startup_vm()
         return self.vm_ready(timeout=12)
 
@@ -449,7 +449,7 @@ class App:
                 miss += 1
                 if miss >= 3:
                     miss = 0
-                    self._log('VM 失聯 → 自動重啟')
+                    self._log('虛擬機失聯 → 自動重啟')
                     self.boot_vm_if_needed()
                 time.sleep(5)
                 continue
@@ -462,7 +462,7 @@ class App:
 
     def _scan_now(self):
         if not self.vm_ready(timeout=8):
-            self._ui(lambda: self._set_text(self.lbl_scan, '⏳ VM 未就緒', C_AMBER))
+            self._ui(lambda: self._set_text(self.lbl_scan, '⏳ 虛擬機未就緒', C_AMBER))
             return
         script = (BIND +
                   CH + 'ifconfig wlan0 down 2>/dev/null\n' +
@@ -485,13 +485,13 @@ class App:
                 for a in aps[:20]:
                     f.write('  ' + str(a[0]) + ' ' + str(a[1]) + ' ch' + str(a[2]) + ' ' + str(a[3]) + '\n')
             self.aps = aps
-            self._log('scan parsed %d aps' % len(aps))
+            self._log('掃描解析 %d 台' % len(aps))
             self._refresh_tree()
             self._ui(lambda: self.lbl_scan.config(
                 text='📡 %s · %d AP' % (time.strftime('%H:%M:%S'), len(aps)),
                 fg=C_GREEN if aps else C_AMBER))
         except Exception as e:
-            self._ui(lambda: self._set_text(self.lbl_scan, '⚠️ scan 失敗', C_RED))
+            self._ui(lambda: self._set_text(self.lbl_scan, '⚠️ 掃描失敗', C_RED))
 
     @staticmethod
     def _parse_scan(out):
@@ -600,7 +600,7 @@ class App:
 
     def _round(self, rnd, ssid, bssid, ch, wip, port, dur):
         if not self.boot_vm_if_needed():
-            self.set_phase('cap', 'VM 未就緒，等待...', '重試中')
+            self.set_phase('cap', '虛擬機未就緒，等待...', '重試中')
             time.sleep(15)
             return
         # ---- 2. capture ----
@@ -641,7 +641,7 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                         len(self.hash_pool)),
                        '只送 %s 相關的 %d 行' % (ssid, len(self._target_lines())))
         if not self._target_lines():
-            self._log('   本輪沒有 %s 的 hash — 再抓一輪' % ssid)
+            self._log('   本輪沒抓到 %s 的握手包 — 再抓一輪' % ssid)
             time.sleep(3)
             return
         # ---- 3. post ----
@@ -705,7 +705,7 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                 method='POST')
             body = urllib.request.urlopen(req, timeout=20).read().decode(
                 'utf-8', 'replace')
-            self._log('   POST OK: %s' % body[:140])
+            self._log('   上傳成功: %s' % body[:140])
             try:
                 d = json.loads(body)
                 if d.get('password'):
@@ -714,7 +714,7 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                 pass
             return True
         except Exception as e:
-            self._log('   POST FAIL: %s' % e)
+            self._log('   上傳失敗: %s' % e)
             return False
 
     def _wait_result(self, wip, port, timeout=900):
@@ -732,7 +732,7 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                 msg = d.get('message', '')
                 if msg and msg != last:
                     last = msg
-                    self._log('   Windows: %s' % msg)
+                    self._log('   Windows 回報: %s' % msg)
                     self._ui(lambda m=msg: self._set_text(self.phases['crack_sub'], m))
                 if status in ('done', 'cracked', 'idle'):
                     for r in d.get('results', []):
