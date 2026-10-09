@@ -244,8 +244,8 @@ def crack_hashes(hash_file, wordlist_key, rules_key=None, mode="0", mask=None):
     log(f"Starting hashcat ({info})")
     try:
         cmd = [HASHCAT, "-m", "22000",
-               "--self-test-disable", "--restore-disable",
-               f"--hwmon-temp-abort={TEMP_CRIT}", "-w", "2",
+               "--self-test-disable", "--restore-disable", "-O",
+               f"--hwmon-temp-abort={TEMP_CRIT}", "-w", "3",
                "--potfile-path", POTFILE]
         if mode == "0":
             cmd.extend(["-a", "0", hash_file, wordlist])
@@ -328,8 +328,10 @@ def crack_hashes(hash_file, wordlist_key, rules_key=None, mode="0", mask=None):
 STAGES = [
     {"name": "wifi_wordlist straight", "wordlist": "wifi_wordlist", "rules": None, "mask": None, "mode": "0"},
     {"name": "rockyou plain", "wordlist": "rockyou", "rules": None, "mask": None, "mode": "0"},
+    {"name": "手機門號 09xxxxxxxx", "wordlist": None, "rules": None, "mask": "09?d?d?d?d?d?d?d?d", "mode": "mask"},
+    {"name": "8 位純數字", "wordlist": None, "rules": None, "mask": "?d?d?d?d?d?d?d?d", "mode": "mask"},
     {"name": "rockyou + best66", "wordlist": "rockyou", "rules": "best66", "mask": None, "mode": "0"},
-    {"name": "mask ?d x10", "wordlist": None, "rules": None, "mask": "?d?d?d?d?d?d?d?d?d?d", "mode": "mask"},
+    {"name": "10 位純數字（長攻）", "wordlist": None, "rules": None, "mask": "?d?d?d?d?d?d?d?d?d?d", "mode": "mask"},
 ]
 
 def lookup_potfile(ssid_hex):
