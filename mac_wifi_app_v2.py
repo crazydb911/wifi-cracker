@@ -10,7 +10,7 @@ mac_wifi_app_v2.py — 一選就跑
 """
 import tkinter as tk
 from tkinter import ttk
-import subprocess, threading, time, json, re, os, urllib.request, signal
+import subprocess, threading, time, json, re, os, urllib.request, signal, queue
 
 # ---------------- fixed paths (Mac side) ----------------
 QEMU_BIN = '/opt/homebrew/bin/qemu-system-aarch64'
@@ -49,17 +49,17 @@ C_ACC     = '#3b82f6'   # blue
 C_GREEN   = '#22c55e'
 C_RED     = '#ef4444'
 C_AMBER   = '#f59e0b'
-FONT      = ('Helvetica', 12)
-FONT_B    = ('Helvetica', 12, 'bold')
-FONT_H    = ('Helvetica', 18, 'bold')
-FONT_MONO = ('Menlo', 11)
+FONT      = ('PingFang SC', 12)
+FONT_B    = ('PingFang SC', 12, 'bold')
+FONT_H    = ('PingFang SC', 18, 'bold')
+FONT_MONO = ('PingFang SC', 11)
 FONT_PASS = ('Menlo', 20, 'bold')
 
 class App:
     def __init__(self, root):
         self.root = root
         root.title('WiFi 破解台  ·  選一台 → 自動跑')
-        root.geometry('1060x720')
+        root.geometry('1060x720+30+30')
         root.minsize(900, 620)
         root.configure(bg=C_BG)
 
@@ -76,14 +76,18 @@ class App:
         self.phase = ('idle', '等待選定 Wi-Fi')
 
         self._build()
-        threading.Thread(target=self._usb_vm_loop, daemon=True).start()
-        threading.Thread(target=self._scan_loop, daemon=True).start()
-        self._log('就緒。自動掃描中 — 在左邊選一台 Wi-Fi 就會自動開始。')
+        self._q = queue.Queue()
+        self.root.after(40, self._drain)
+        if os.environ.get('MACAPP_UI_ONLY'):
+            self._log('UI-only 模式（除錯）')
+        else:
+            threading.Thread(target=self._usb_vm_loop, daemon=True).start()
+            threading.Thread(target=self._scan_loop, daemon=True).start()
+            self._log('就緒。自動掃描中 — 在左邊選一台 Wi-Fi 就會自動開始。')
+            self._startup_vm()
         signal.signal(signal.SIGUSR1, self._lift)
 
         self.root.after(800, self._lift)
-
-        self._startup_vm()
 
 
     def _ui_selfcheck(self):
@@ -278,6 +282,8 @@ class App:
 
             try:
 
+                self.root.geometry('1060x720+30+30')
+
                 self.root.deiconify()
 
                 self.root.attributes('-topmost', True)
@@ -322,9 +328,24 @@ class App:
 
     def _ui(self, fn):
         try:
-            self.root.after(0, fn)
+            self._q.put(fn)
         except Exception:
             pass
+
+    def _drain(self):
+        try:
+            for _ in range(60):
+                try:
+                    fn = self._q.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    fn()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self.root.after(40, self._drain)
 
     def _log(self, msg):
         def _do():
@@ -369,7 +390,7 @@ class App:
 
     def _check_usb(self):
         try:
-            r = subprocess.run('ioreg -r -c IOUSBHostDevice', shell=True,
+            r = subprocess.run(['ioreg', '-r', '-c', 'IOUSBHostDevice'],
                                capture_output=True, timeout=30)
             out = (r.stdout or b'').decode('utf-8', 'replace')
             if ('idVendor" = 5263' in out) and ('idProduct" = 21874' in out):
@@ -377,7 +398,7 @@ class App:
         except Exception:
             pass
         try:
-            r = subprocess.run('system_profiler SPUSBDataType', shell=True,
+            r = subprocess.run(['system_profiler', 'SPUSBDataType'],
                                capture_output=True, timeout=30)
             out = (r.stdout or b'').decode('utf-8', 'replace').lower()
             return ('148f' in out) and ('5572' in out)
@@ -387,8 +408,8 @@ class App:
     def vm_ready(self, timeout=25):
         try:
             r = subprocess.run(
-                VM_SSH + ' "%s/usr/sbin/iw dev 2>/dev/null"' % CH,
-                shell=True, capture_output=True, timeout=timeout)
+                VM_SSH.split() + [CH + '/usr/sbin/iw dev 2>/dev/null'],
+                capture_output=True, timeout=timeout)
             out = (r.stdout or b'').decode('utf-8', 'replace')
             return 'wlan0' in out
         except Exception:
@@ -476,8 +497,8 @@ class App:
                   CH + '  /usr/bin/tcpdump -r /tmp/bc_$ch.pcap -e -n 2>/dev/null\n' +
                   'done\n')
         try:
-            r = subprocess.run(VM_SSH + ' "sh -s"', input=script.encode(),
-                               capture_output=True, timeout=90, shell=True)
+            r = subprocess.run(VM_SSH.split() + ['sh', '-s'], input=script.encode(),
+                               capture_output=True, timeout=90)
             out = (r.stdout or b'').decode('utf-8', 'replace')
             aps = self._parse_scan(out)
             with open('/tmp/mac_wifi_scan.txt', 'w') as f:
@@ -620,8 +641,8 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                   'echo "===HASH==="\n' +
                   'cat ' + CH + '/tmp/scan_%d.22000 2>/dev/null\n' % rnd +
                   'echo "===END==="\n')
-        r = subprocess.run(VM_SSH + ' "sh -s"', input=script.encode(),
-                           capture_output=True, timeout=dur + 150, shell=True)
+        r = subprocess.run(VM_SSH.split() + ['sh', '-s'], input=script.encode(),
+                           capture_output=True, timeout=dur + 150)
         out = (r.stdout or b'').decode('utf-8', 'replace') + \
               (r.stderr or b'').decode('utf-8', 'replace')
         lines = out.splitlines()
