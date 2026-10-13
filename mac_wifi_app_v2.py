@@ -476,6 +476,15 @@ class App:
                 continue
             miss = 0
             self._scan_now()
+            if not self.aps:
+                zero = getattr(self, '_zero_scans', 0) + 1
+                self._zero_scans = zero
+                if zero >= 3:
+                    self._zero_scans = 0
+                    self._log('連續掃不到訊號 → 重啟抓包環境')
+                    self._startup_vm()
+            else:
+                self._zero_scans = 0
             for _ in range(6):
                 if self._stop.is_set():
                     return
