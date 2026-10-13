@@ -486,6 +486,43 @@ document.getElementById('temp-limit-val').textContent=this.value;
 update();setInterval(update,2000);setInterval(loadLog,5000);setInterval(listPcaps,10000);
 </script></body></html>""")
 
+@app.get("/api/known")
+def api_known():
+    """SSID lists: cracked (potfile) and captured (uploads hc22000)."""
+    cracked, captured = [], []
+    try:
+        if os.path.exists(POTFILE):
+            with open(POTFILE, 'r') as f:
+                for line in f:
+                    if '*' not in line:
+                        continue
+                    rest = line.split('*', 1)[1]
+                    if ':' in rest:
+                        s_hex = rest.split(':', 1)[0].strip().upper()
+                        try:
+                            cracked.append(bytes.fromhex(s_hex).decode('utf-8', 'replace'))
+                        except Exception:
+                            pass
+    except Exception:
+        pass
+    try:
+        for fn in os.listdir(UPLOAD_DIR):
+            if not fn.endswith('.hc22000'):
+                continue
+            try:
+                with open(os.path.join(UPLOAD_DIR, fn), 'r') as f:
+                    first = f.readline().strip()
+                fields = first.split('*')
+                if len(fields) > 5:
+                    captured.append(bytes.fromhex(fields[5].strip().upper()).decode('utf-8', 'replace'))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return JSONResponse({"ok": True, "cracked": sorted(set(cracked)),
+                         "captured": sorted(set(captured))})
+
+
 @app.get("/api/state")
 async def get_state():
     get_gpu_status()

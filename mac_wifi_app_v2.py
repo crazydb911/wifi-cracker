@@ -180,14 +180,16 @@ class App:
         tk.Button(lf, text='重新掃描', command=self._scan_now, bg=C_CARD,
                   fg=C_TEXT, relief='flat', padx=10, font=FONT,
                   activebackground=C_CARD_HI).pack(side='right')
-        self.tree = ttk.Treeview(left, columns=('ssid', 'ch', 'sig'),
+        self.tree = ttk.Treeview(left, columns=('ssid', 'ch', 'sig', 'stat'),
                                  show='headings', selectmode='browse')
         self.tree.heading('ssid', text='網路名稱')
         self.tree.heading('ch', text='頻道')
         self.tree.heading('sig', text='訊號')
+        self.tree.heading('stat', text='狀態')
         self.tree.column('ssid', anchor='w', stretch=True)
         self.tree.column('ch', width=42, anchor='center', stretch=False)
         self.tree.column('sig', width=52, anchor='center', stretch=False)
+        self.tree.column('stat', width=76, anchor='center', stretch=False)
         st.configure('Dark.Treeview', background=C_CARD, fieldbackground=C_CARD,
              foreground=C_TEXT, rowheight=30, font=FONT)
         st.configure('Dark.Treeview.Heading', background=C_PANEL,
@@ -558,14 +560,38 @@ class App:
         return res
 
 
+    def _known(self):
+        import time as _t
+        now = _t.time()
+        if getattr(self, '_known_cache', None) and now - self._known_cache[0] < 60:
+            return self._known_cache[1]
+        data = (set(), set())
+        try:
+            wip = self.var['wip'].get().strip()
+            port = self.var['port'].get().strip()
+            req = urllib.request.urlopen('http://%s:%s/api/known' % (wip, port), timeout=5)
+            d = json.loads(req.read().decode('utf-8', 'replace'))
+            data = (set(d.get('cracked') or []), set(d.get('captured') or []))
+        except Exception:
+            data = getattr(self, '_known_cache', (None, (set(), set())))[1]
+        self._known_cache = (now, data)
+        return data
+
     def _refresh_tree(self):
         if list(self.aps) == getattr(self, '_last_aps', None):
             return
         self._last_aps = list(self.aps)
+        cracked, captured = self._known()
         def _do():
             self.tree.delete(*self.tree.get_children())
             for ssid, bssid, ch, sig in self.aps:
-                self.tree.insert('', 'end', values=(ssid, ch, sig))
+                if ssid in cracked:
+                    stat = '🔓 已破解'
+                elif ssid in captured:
+                    stat = '📦 已抓包'
+                else:
+                    stat = ''
+                self.tree.insert('', 'end', values=(ssid, ch, sig, stat))
             if self.target:
                 for i, (ssid, bssid, ch, sig) in enumerate(self.aps):
                     if bssid == self.target[1]:
