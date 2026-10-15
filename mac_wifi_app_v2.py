@@ -36,7 +36,7 @@ BIND = ('mount --bind /proc /newroot/proc 2>/dev/null; '
         'mount --bind /dev /newroot/dev 2>/dev/null\n') if RUNNER_MODE else ''
 
 LOCAL_DIR = os.path.expanduser('~/MacCapture/captures')
-DEFAULT_WIP, DEFAULT_PORT, DEFAULT_DUR = '192.168.1.107', '8766', '45'
+DEFAULT_WIP, DEFAULT_PORT, DEFAULT_DUR = '100.94.10.122', '8766', '45'
 
 # ---------------- dark theme ----------------
 C_BG      = '#12151c'   # window
@@ -74,6 +74,7 @@ class App:
         self.target = None     # (ssid, bssid, ch)
         self.hash_pool = set() # hashes for current target
         self.phase = ('idle', '等待選定 Wi-Fi')
+        self._boot_lock = threading.Lock()
 
         self._build()
         self._q = queue.Queue()
@@ -374,11 +375,15 @@ class App:
         while not self._stop.is_set():
             usb = self._check_usb()
             vm = self.vm_ready(timeout=8) if usb else False
-            if usb and vm:
-                tu, cu = '🔌 抓包網卡：✅ 已連線', C_GREEN
+            wlan = self.wlan_ok() if vm else False
+            if usb and wlan:
+                tu, cu = '🔌 抓包網卡：✅ 已抓取', C_GREEN
+                tv, cv = '📶 掃描引擎：✅ 就緒', C_GREEN
+            elif vm:
+                tu, cu = '🔌 抓包網卡：⚠️ 請拔插重掛', C_AMBER
                 tv, cv = '📶 掃描引擎：✅ 就緒', C_GREEN
             elif usb:
-                tu, cu = '🔌 抓包網卡：✅ 已連線', C_GREEN
+                tu, cu = '🔌 抓包網卡：✅ 已插入', C_GREEN
                 tv, cv = '📶 掃描引擎：⏳ 啟動中…', C_AMBER
             else:
                 tu, cu = '🔌 抓包網卡：❌ 未偵測到（請插入）', C_RED
@@ -409,11 +414,29 @@ class App:
 
     def vm_ready(self, timeout=25):
         try:
+            r = subprocess.run(VM_SSH.split() + ['echo VMOK'],
+                               capture_output=True, timeout=timeout)
+            return b'VMOK' in (r.stdout or b'')
+        except Exception:
+            return False
+
+    def wlan_ok(self):
+        try:
             r = subprocess.run(
                 VM_SSH.split() + [CH + '/usr/sbin/iw dev 2>/dev/null'],
-                capture_output=True, timeout=timeout)
-            out = (r.stdout or b'').decode('utf-8', 'replace')
-            return 'wlan0' in out
+                capture_output=True, timeout=20)
+            return 'wlan0' in (r.stdout or b'').decode('utf-8', 'replace')
+        except Exception:
+            return False
+
+    def hotadd_adapter(self):
+        try:
+            subprocess.run(
+                ['sh', '-c', 'printf "device_add usb-host,vendorid=0x148f,'
+                             'productid=0x5572,id=wifiA\\n" | nc -U -w 3 ' + MON_SOCK],
+                capture_output=True, timeout=10)
+            time.sleep(4)
+            return self.wlan_ok()
         except Exception:
             return False
 
@@ -421,6 +444,14 @@ class App:
         if self.vm_ready(timeout=10):
             self._log('✅ 虛擬機已就緒（沿用）')
             return
+        if not self._boot_lock.acquire(blocking=False):
+            return
+        try:
+            self._startup_vm_inner()
+        finally:
+            self._boot_lock.release()
+
+    def _startup_vm_inner(self):
         self._log('⏳ 啟動虛擬機（抓包網卡）...')
         missing = [f for f in (QEMU_BIN, QCOW2, KERNEL, INITRD, SSH_KEY)
                    if not os.path.exists(f)]
@@ -454,9 +485,38 @@ class App:
             time.sleep(3)
         self._log('⚠️ 虛擬機啟動逾時（之後每輪重試）')
 
+    def _qemu_age(self):
+        try:
+            r = subprocess.run(['pgrep', '-f', 'qemu-system-aarch64'],
+                               capture_output=True, timeout=10)
+            pid = (r.stdout or b'').decode().split('\n')[0].strip()
+            if not pid:
+                return -1
+            r2 = subprocess.run(['ps', '-o', 'etime=', '-p', pid],
+                                capture_output=True, timeout=10)
+            et = (r2.stdout or b'').decode().strip()
+            secs = 0
+            for p in et.split(':'):
+                if p.strip().isdigit():
+                    secs = secs * 60 + int(p)
+            return secs
+        except Exception:
+            return -1
+
     def boot_vm_if_needed(self):
         if self.vm_ready(timeout=12):
             return True
+        age = self._qemu_age()
+        if age >= 0 and age < 180:
+            self._log('虛擬機啟動中，等待...')
+            for _ in range(30):
+                if self._stop.is_set():
+                    return False
+                time.sleep(5)
+                if self.vm_ready(timeout=8):
+                    self._log('✅ 虛擬機就緒')
+                    return True
+            return False
         self._log('虛擬機不在 → 重啟 ...')
         self._startup_vm()
         return self.vm_ready(timeout=12)
@@ -469,6 +529,10 @@ class App:
                 time.sleep(3)
                 continue
             if not self.vm_ready(timeout=8):
+                age = self._qemu_age()
+                if age >= 0 and age < 180:
+                    time.sleep(10)
+                    continue
                 miss += 1
                 if miss >= 3:
                     miss = 0
@@ -477,6 +541,13 @@ class App:
                 time.sleep(5)
                 continue
             miss = 0
+            if not self.wlan_ok():
+                self._log('網卡不在虛擬機 → 嘗試熱掛接...')
+                if not self.hotadd_adapter():
+                    self._ui(lambda: self._set_text(
+                        self.lbl_scan, '⚠️ 請拔插 USB 網卡', C_AMBER))
+                    time.sleep(10)
+                    continue
             self._scan_now()
             if not self.aps:
                 zero = getattr(self, '_zero_scans', 0) + 1
