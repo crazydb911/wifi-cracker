@@ -509,8 +509,8 @@ update();setInterval(update,2000);setInterval(loadLog,5000);setInterval(listPcap
 
 @app.get("/api/known")
 def api_known():
-    """SSID lists: cracked (potfile) and captured (uploads hc22000)."""
-    cracked, captured = [], []
+    """SSID lists: cracked {ssid: password} (potfile) and captured (uploads)."""
+    cracked, captured = {}, []
     try:
         if os.path.exists(POTFILE):
             with open(POTFILE, 'r') as f:
@@ -519,9 +519,11 @@ def api_known():
                         continue
                     rest = line.split('*', 1)[1]
                     if ':' in rest:
-                        s_hex = rest.split(':', 1)[0].strip().upper()
+                        s_hex, pw = rest.split(':', 1)
                         try:
-                            cracked.append(bytes.fromhex(s_hex).decode('utf-8', 'replace'))
+                            cracked[bytes.fromhex(
+                                s_hex.strip().upper()).decode(
+                                    'utf-8', 'replace')] = pw.strip()
                         except Exception:
                             pass
     except Exception:
@@ -540,7 +542,7 @@ def api_known():
                 pass
     except Exception:
         pass
-    return JSONResponse({"ok": True, "cracked": sorted(set(cracked)),
+    return JSONResponse({"ok": True, "cracked": cracked,
                          "captured": sorted(set(captured))})
 
 

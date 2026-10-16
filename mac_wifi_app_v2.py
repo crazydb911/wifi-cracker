@@ -213,10 +213,10 @@ class App:
         tc = tk.Frame(mid, bg=C_CARD)
         tc.pack(fill='x', padx=10, pady=(10, 6), ipadx=14, ipady=12)
         self.lbl_target = tk.Label(tc, text='尚未選定', font=FONT_H,
-                                   bg=C_CARD, fg=C_TEXT)
+                                   bg=C_CARD, fg=C_TEXT, wraplength=430)
         self.lbl_target.pack(anchor='w')
         self.lbl_target_sub = tk.Label(tc, text='—', font=FONT,
-                                       bg=C_CARD, fg=C_DIM)
+                                       bg=C_CARD, fg=C_DIM, wraplength=430)
         self.lbl_target_sub.pack(anchor='w', pady=(2, 0))
         # phase list
         self.phases = {}
@@ -226,17 +226,18 @@ class App:
             row = tk.Frame(mid, bg=C_PANEL)
             row.pack(fill='x', padx=10, pady=2)
             self.phases[key] = tk.Label(row, text='○  ' + name, font=FONT_B,
-                                        bg=C_PANEL, fg=C_DIM, anchor='w')
+                                        bg=C_PANEL, fg=C_DIM, anchor='w',
+                                        wraplength=430)
             self.phases[key].pack(fill='x')
             self.phases[key + '_sub'] = tk.Label(mid, text='', font=FONT_MONO,
                                                  bg=C_PANEL, fg=C_DIM,
-                                                 anchor='w')
+                                                 anchor='w', wraplength=430)
             self.phases[key + '_sub'].pack(fill='x', padx=24)
         # result card
         rc = tk.Frame(mid, bg=C_CARD)
         rc.pack(fill='x', padx=10, pady=8)
         self.lbl_result = tk.Label(rc, text='—', font=FONT_PASS, bg=C_CARD,
-                                   fg=C_DIM, anchor='center')
+                                   fg=C_DIM, anchor='center', wraplength=430)
         self.lbl_result.pack(padx=14, ipadx=14, ipady=18)
 
         # ---- right: log ----
@@ -678,15 +679,36 @@ class App:
         now = _t.time()
         if getattr(self, '_known_cache', None) and now - self._known_cache[0] < 60:
             return self._known_cache[1]
-        data = (set(), set())
+        data = ({}, set())
         try:
             wip = self.var['wip'].get().strip()
             port = self.var['port'].get().strip()
             req = urllib.request.urlopen('http://%s:%s/api/known' % (wip, port), timeout=5)
             d = json.loads(req.read().decode('utf-8', 'replace'))
-            data = (set(d.get('cracked') or []), set(d.get('captured') or []))
+            ck = d.get('cracked') or {}
+            if not isinstance(ck, dict):
+                ck = {s: '' for s in ck}
+            data = (ck, set(d.get('captured') or []))
         except Exception:
-            data = getattr(self, '_known_cache', (None, (set(), set())))[1]
+            data = getattr(self, '_known_cache', (None, ({}, set())))[1]
+        try:
+            with open(os.path.expanduser('~/wifi_cracker/local_pot')) as f:
+                for line in f:
+                    if '*' not in line or ':' not in line:
+                        continue
+                    rest = line.split('*', 1)[1]
+                    if ':' not in rest:
+                        continue
+                    s_hex, pw = rest.split(':', 1)
+                    try:
+                        ssid = bytes.fromhex(
+                            s_hex.strip().upper()).decode('utf-8', 'replace')
+                        if ssid and ssid not in data[0]:
+                            data[0][ssid] = pw.strip()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
         self._known_cache = (now, data)
         return data
 
@@ -738,6 +760,19 @@ class App:
             text='%s · ch%s · %s' % (bssid, ch, sig or '?')))
         self._result('選定 %s — 自動開始…' % ssid, C_ACC)
         self._log('🎯 選定: %s (%s ch%s) → 自動開始' % (ssid, bssid, ch))
+        cracked, _cap = self._known()
+        pw = cracked.get(ssid)
+        if pw:
+            self.set_phase('done', '🔓 已破解（之前解過）', pw)
+            self._result('🔓  %s' % pw, C_GREEN)
+            self._log('🔓 %s 已破解過 → 密碼: %s' % (ssid, pw))
+            try:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(pw)
+                self._log('   已複製到剪貼簿')
+            except Exception:
+                pass
+            return
         if not self._running.is_set():
             threading.Thread(target=self._auto_loop,
                              args=(ssid, bssid, ch), daemon=True).start()
