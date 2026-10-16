@@ -900,7 +900,7 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                   CH + 'hcxpcapngtool -o /tmp/scan_%d.22000 /tmp/scan_%d '
                        '2>&1 | tail -4\n' % (rnd, rnd) +
                   'echo "===HASH==="\n' +
-                  'cat ' + CH + '/tmp/scan_%d.22000 2>/dev/null\n' % rnd +
+                  CH + 'cat /tmp/scan_%d.22000 2>/dev/null\n' % rnd +
                   'echo "===END==="\n')
         t0 = time.time()
         r = subprocess.run(VM_SSH.split() + ['sh', '-s'], input=script.encode(),
