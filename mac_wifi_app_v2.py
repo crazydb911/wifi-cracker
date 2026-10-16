@@ -977,6 +977,10 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
             for l in cap_part[-4:]:
                 if l.strip():
                     self._log('   抓包器: %s' % l.strip()[:110])
+            if raw != 0:
+                # 抓包器正常（有其他 AP 的 hash），只是目標 AP 安靜 — 不算失敗
+                time.sleep(3)
+                return
             self._ev('capfail', 'round=%d capout=%r' % (
                 rnd, ' | '.join(cap_part)[:400]))
             streak = getattr(self, '_cap_streak', 0) + 1

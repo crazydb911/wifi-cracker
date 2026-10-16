@@ -767,6 +767,18 @@ def crack_hashes_custom(hash_file, wordlist_path, rules_key, mode, mask):
         log(f"Crack error: {e}")
 
 if __name__ == "__main__":
+    # 單實例防呆：8766 已有人監聽就直接退出（排程重啟不搶埠）
+    import socket
+    _probe = socket.socket()
+    _probe.settimeout(2)
+    try:
+        _probe.connect(("127.0.0.1", 8766))
+        print("port 8766 already served, exiting")
+        sys.exit(0)
+    except OSError:
+        pass
+    finally:
+        _probe.close()
     log("Windows WiFi Cracker starting on port 8766...")
     get_gpu_status()
     uvicorn.run(app, host="0.0.0.0", port=8766)
