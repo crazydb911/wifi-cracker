@@ -889,7 +889,7 @@ class App:
         self.set_phase('cap', '第 %d 輪抓包 (%ds)' % (rnd, dur),
                        'hcxdumptool %s ch%s' % (bssid, ch))
         script = (BIND +
-CH + 'rm -f /tmp/scan_* 2>/dev/null\n' +
+CH + 'sh -c "rm -f /tmp/scan_*" 2>/dev/null\n' +
 CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                   CH + 'iw dev wlan0 set type monitor 2>/dev/null\n' +
                   CH + 'ifconfig wlan0 up 2>/dev/null\nsleep 3\n' +
@@ -937,8 +937,22 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                     self._log('   抓包器: %s' % l.strip()[:110])
             self._ev('capfail', 'round=%d capout=%r' % (
                 rnd, ' | '.join(cap_part)[:400]))
-            time.sleep(3)
+            streak = getattr(self, '_cap_streak', 0) + 1
+            self._cap_streak = streak
+            if streak >= 3:
+                self._cap_streak = 0
+                self._log('⚙️ 抓包連續失敗 → 重建抓包環境(QEMU重啟)')
+                self._ev('heal', 'trigger=capfail x3')
+                try:
+                    subprocess.run(['pkill', '-f', 'qemu-system-aarch64'])
+                except Exception:
+                    pass
+                time.sleep(2)
+                self._startup_vm()
+            else:
+                time.sleep(3)
             return
+        self._cap_streak = 0
         # ---- 3. post (Windows 決定: 秒回 / 自動解 / 掛起待確認) ----
         status, pw = self._post(self._target_lines(), ssid, bssid, wip, port)
         if status == 'cracked':
