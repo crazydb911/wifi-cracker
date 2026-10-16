@@ -585,9 +585,15 @@ class App:
                   'done\n')
         try:
             r = subprocess.run(VM_SSH.split() + ['sh', '-s'], input=script.encode(),
-                               capture_output=True, timeout=90)
+                               capture_output=True, timeout=45)
             out = (r.stdout or b'').decode('utf-8', 'replace')
             aps = self._parse_scan(out)
+            now = time.time()
+            pool = getattr(self, '_ap_pool', {})
+            for t in aps:
+                pool[t[1]] = (t, now)
+            self._ap_pool = pool
+            aps = [pool[b][0] for b in pool if now - pool[b][1] < 120]
             with open('/tmp/mac_wifi_scan.txt', 'w') as f:
                 f.write(time.strftime('%H:%M:%S') + ' APs=' + str(len(aps)) + '\n')
                 for a in aps[:20]:
@@ -599,6 +605,18 @@ class App:
                 text='📡 %s · %d AP' % (time.strftime('%H:%M:%S'), len(aps)),
                 fg=C_GREEN if aps else C_AMBER))
         except Exception as e:
+            self._log('掃描異常: %r' % e)
+            fails = getattr(self, '_fail_scans', 0) + 1
+            self._fail_scans = fails
+            if fails >= 3:
+                self._fail_scans = 0
+                self._log('掃描連續失敗 → 重建抓包環境')
+                try:
+                    subprocess.run(['pkill', '-f', 'qemu-system-aarch64'])
+                except Exception:
+                    pass
+                time.sleep(2)
+                self._startup_vm()
             self._ui(lambda: self._set_text(self.lbl_scan, '⚠️ 掃描失敗', C_RED))
 
     @staticmethod
