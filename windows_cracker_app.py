@@ -74,13 +74,21 @@ def log(msg):
 def get_gpu_status():
     try:
         r = subprocess.run(
-            ['nvidia-smi', '--query-gpu=temperature.gpu,utilization.gpu', '--format=csv,noheader'],
+            ['nvidia-smi', '--query-gpu=temperature.gpu,utilization.gpu,memory.used',
+             '--format=csv,noheader,nounits'],
             capture_output=True, text=True, timeout=5)
-        t, u = r.stdout.strip().split(',')
+        t, u, m = r.stdout.strip().split(',')
         STATE["gpu_temp"] = int(t.strip())
         STATE["gpu_util"] = int(u.strip().replace('%', ''))
+        STATE["gpu_mem_used"] = int(m.strip())
     except:
         pass
+
+GPU_MEM_IDLE_MAX = 1000  # MiB; above this likely means local model occupies VRAM
+
+def gpu_busy():
+    get_gpu_status()
+    return STATE.get("gpu_mem_used", 0) > GPU_MEM_IDLE_MAX
 
 def thermal_monitor():
     """Monitor GPU temp during cracking, throttle if needed."""
@@ -439,6 +447,12 @@ select,input{background:#0f3460;color:#eee;border:none;padding:8px;border-radius
 <button onclick="crack()" id="btn-crack" disabled>Crack</button>
 <div class="results" id="results">No results yet</div>
 </div>
+<div class="card" id="pending-card" style="display:none;border:2px solid #ff9800">
+<h2>⏸ 收到新 hash — 等待確認</h2>
+<div id="pending-info" style="font-size:14px;margin-bottom:8px"></div>
+<button onclick="confirmCrack()" style="background:#4caf50">▶ 開始破解</button>
+<button onclick="rejectCrack()" style="background:#666">✕ 拒絕</button>
+</div>
 <div class="card"><h2>Log (live)</h2><div class="log" id="log"></div></div>
 <div class="card"><h2>File Log</h2><button onclick="loadLog()" style="font-size:12px;padding:5px 10px">Refresh</button><div class="log" id="log-file" style="max-height:200px"></div></div>
 <div class="card"><h2>Uploaded PCAPs</h2><button onclick="listPcaps()" style="font-size:12px;padding:5px 10px">Refresh</button><div class="results" id="pcap-list" style="font-size:12px"></div></div>
@@ -459,7 +473,14 @@ document.getElementById('ssid').textContent=d.ssid||'--';
 document.getElementById('results').textContent=d.results.length?d.results.join('\\n'):'No results yet';
 document.getElementById('btn-crack').disabled=!d.hash_file||d.status!=='idle';
 document.getElementById('btn-extract').disabled=d.status!=='idle';
+const pc=document.getElementById('pending-card');
+if(d.status==='pending'&&d.pending){pc.style.display='block';
+const p=d.pending;
+document.getElementById('pending-info').innerHTML='SSID: <b>'+p.ssid+'</b><br>BSSID: '+p.bssid+'<br>hash 行數: '+p.lines+'<br>收到時間: '+p.time+'<br>目前顯存已用: '+(d.gpu_mem_used||'?')+'MB';
+}else{pc.style.display='none'}
 }).catch(e=>console.error(e))}
+function confirmCrack(){fetch('/api/confirm',{method:'POST'}).then(r=>r.json()).then(update)}
+function rejectCrack(){fetch('/api/reject',{method:'POST'}).then(r=>r.json()).then(update)}
 function extract(){
 const f=document.getElementById('pcap-file').files[0];
 const s=document.getElementById('ssid-input').value||'32H9F_5G';
@@ -567,16 +588,55 @@ async def api_receive_hash(request: Request):
         log(f"✅ INSTANT: {ssid} = {password} (from potfile)")
         return JSONResponse({"ok": True, "password": password, "source": "potfile", "ssid": ssid})
     
-    # Not in potfile -> run bounded multi-stage crack
+    # GPU idle -> crack right away; GPU busy (local model in VRAM) -> hold for confirm
+    if not gpu_busy():
+        STATE["status"] = "cracking"
+        STATE["cracking"] = True
+        STATE["results"] = []
+        STATE["message"] = f"Cracking {ssid}: {len(STAGES)}-stage (顯存閒置自動跑)..."
+        STATE["progress"] = 5
+        threading.Thread(target=multi_stage_crack, args=(hash_file, ssid),
+                         daemon=True).start()
+        log(f"▶ GPU idle, auto-cracking {ssid}")
+        return JSONResponse({"ok": True, "auto": True,
+                             "message": "顯存閒置 → 直接開始破解"})
+
+    STATE["status"] = "pending"
+    STATE["cracking"] = False
+    STATE["results"] = []
+    STATE["progress"] = 0
+    STATE["message"] = ("收到 %s 的 hash（%d 行, BSSID %s）— 顯存被佔用 %sMB，等待確認是否破解"
+                        % (ssid, len(hash_str.splitlines()), bssid or '?',
+                           STATE.get("gpu_mem_used", '?')))
+    STATE["pending"] = {"hash_file": hash_file, "ssid": ssid, "bssid": bssid,
+                        "lines": len(hash_str.splitlines()),
+                        "time": time.strftime('%H:%M:%S')}
+    log(f"⏸ Hash held for confirmation: {ssid}")
+    return JSONResponse({"ok": True, "pending": True,
+                         "message": "hash 已儲存，等待確認破解"})
+
+@app.post("/api/confirm")
+async def api_confirm():
+    p = STATE.get("pending")
+    if not p:
+        return JSONResponse({"ok": False, "error": "Nothing pending"})
+    STATE["pending"] = None
     STATE["status"] = "cracking"
     STATE["cracking"] = True
     STATE["results"] = []
-    STATE["message"] = f"Cracking {ssid}: {len(STAGES)}-stage (not in potfile)..."
+    STATE["message"] = f"Cracking {p['ssid']}: {len(STAGES)}-stage (confirmed)..."
     STATE["progress"] = 5
-    
-    threading.Thread(target=multi_stage_crack, args=(hash_file, ssid), daemon=True).start()
-    
-    return JSONResponse({"ok": True, "message": f"Hash received, running {len(STAGES)}-stage crack"})
+    threading.Thread(target=multi_stage_crack, args=(p["hash_file"], p["ssid"]),
+                     daemon=True).start()
+    log(f"▶ User confirmed, cracking {p['ssid']}")
+    return JSONResponse({"ok": True, "message": "cracking started"})
+
+@app.post("/api/reject")
+async def api_reject():
+    STATE["pending"] = None
+    STATE["status"] = "idle"
+    STATE["message"] = "已拒絕破解（hash 已存檔，Mac 可重送）"
+    return JSONResponse({"ok": True})
 
 @app.post("/api/extract")
 async def api_extract(file: UploadFile = File(...), ssid: str = "32H9F_5G"):
