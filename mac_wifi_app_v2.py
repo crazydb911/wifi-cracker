@@ -608,7 +608,6 @@ class App:
                 for a in aps[:20]:
                     f.write('  ' + str(a[0]) + ' ' + str(a[1]) + ' ch' + str(a[2]) + ' ' + str(a[3]) + '\n')
             self.aps = aps
-            self._log('掃描解析 %d 台' % len(aps))
             self._refresh_tree()
             self._ui(lambda: self.lbl_scan.config(
                 text='📡 %s · %d AP' % (time.strftime('%H:%M:%S'), len(aps)),
