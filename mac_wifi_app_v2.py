@@ -189,8 +189,9 @@ class App:
 
         body = ttk.Frame(self.root)
         body.pack(fill='both', expand=True, padx=14, pady=6)
-        body.columnconfigure(1, weight=3)
-        body.columnconfigure(2, weight=2)
+        body.columnconfigure(0, weight=0, minsize=410)
+        body.columnconfigure(1, weight=3, minsize=430)
+        body.columnconfigure(2, weight=2, minsize=330)
         body.rowconfigure(0, weight=1)
 
         # ---- left: network list ----
@@ -270,7 +271,7 @@ class App:
                  fg=C_DIM).pack(anchor='w', padx=10, pady=(10, 2))
         self.log = tk.Text(right, bg='#101420', fg=C_TEXT, font=FONT_MONO,
                            relief='flat', state='disabled', wrap='word',
-                           insertbackground=C_TEXT)
+                           width=46, insertbackground=C_TEXT)
         self.log.pack(fill='both', expand=True, padx=10, pady=(0, 10),
                       ipadx=8, ipady=6)
 
