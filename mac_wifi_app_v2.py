@@ -85,7 +85,7 @@ class App:
             threading.Thread(target=self._usb_vm_loop, daemon=True).start()
             threading.Thread(target=self._scan_loop, daemon=True).start()
             self._log('就緒。自動掃描中 — 在左邊選一台 Wi-Fi 就會自動開始。')
-            self._startup_vm()
+            threading.Thread(target=self._startup_vm, daemon=True).start()
         signal.signal(signal.SIGUSR1, self._lift)
 
         self.root.after(800, self._lift)
@@ -117,6 +117,29 @@ class App:
                 lines.append("tree_err=%s" % e)
             try:
                 lines.append("target=%r phase=%r aps=%d" % (self.target, self.phase, len(self.aps)))
+            except Exception:
+                pass
+            try:
+                for k in ('scan', 'cap', 'conv', 'crack'):
+                    lb = self.phases[k]
+                    lines.append("ph_%s req=%d w=%d t=%r" % (
+                        k, lb.winfo_reqwidth(), lb.winfo_width(),
+                        lb.cget('text')))
+                    sb = self.phases[k + '_sub']
+                    lines.append("ps_%s req=%d w=%d t=%r" % (
+                        k, sb.winfo_reqwidth(), sb.winfo_width(),
+                        sb.cget('text')))
+                lines.append("lbl_target req=%d w=%d t=%r" % (
+                    self.lbl_target.winfo_reqwidth(),
+                    self.lbl_target.winfo_width(),
+                    self.lbl_target.cget('text')))
+                lines.append("lbl_result req=%d w=%d t=%r" % (
+                    self.lbl_result.winfo_reqwidth(),
+                    self.lbl_result.winfo_width(),
+                    self.lbl_result.cget('text')))
+                lines.append("win=%dx%d tree_w=%d" % (
+                    self.root.winfo_width(), self.root.winfo_height(),
+                    self.tree.winfo_width()))
             except Exception:
                 pass
             lines.append("t=%s" % _t.strftime("%H:%M:%S"))
