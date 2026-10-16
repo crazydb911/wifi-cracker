@@ -59,8 +59,8 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title('WiFi 破解台  ·  選一台 → 自動跑')
-        root.geometry('1060x720+30+30')
-        root.minsize(900, 620)
+        root.geometry('1280x740+30+30')
+        root.minsize(1000, 620)
         root.configure(bg=C_BG)
 
         self.var = {
@@ -166,7 +166,7 @@ class App:
 
         body = ttk.Frame(self.root)
         body.pack(fill='both', expand=True, padx=14, pady=6)
-        body.columnconfigure(1, weight=2)
+        body.columnconfigure(1, weight=3)
         body.columnconfigure(2, weight=2)
         body.rowconfigure(0, weight=1)
 
@@ -189,8 +189,8 @@ class App:
         self.tree.heading('stat', text='狀態')
         self.tree.column('ssid', anchor='w', stretch=True)
         self.tree.column('ch', width=42, anchor='center', stretch=False)
-        self.tree.column('sig', width=86, anchor='center', stretch=False)
-        self.tree.column('stat', width=76, anchor='center', stretch=False)
+        self.tree.column('sig', width=64, anchor='center', stretch=False)
+        self.tree.column('stat', width=96, anchor='center', stretch=False)
         st.configure('Dark.Treeview', background=C_CARD, fieldbackground=C_CARD,
              foreground=C_TEXT, rowheight=30, font=FONT)
         st.configure('Dark.Treeview.Heading', background=C_PANEL,
@@ -221,8 +221,8 @@ class App:
         # phase list
         self.phases = {}
         for key, name in [('scan', '1 · 選定'), ('cap', '2 · 抓包'),
-                          ('conv', '3 · 轉換握手包 + 上傳'),
-                          ('crack', '4 · Windows 破解中')]:
+                          ('conv', '3 · 轉換+上傳'),
+                          ('crack', '4 · 破解中')]:
             row = tk.Frame(mid, bg=C_PANEL)
             row.pack(fill='x', padx=10, pady=2)
             self.phases[key] = tk.Label(row, text='○  ' + name, font=FONT_B,
@@ -285,7 +285,7 @@ class App:
 
             try:
 
-                self.root.geometry('1060x720+30+30')
+                self.root.geometry('1280x740+30+30')
 
                 self.root.deiconify()
 
@@ -665,9 +665,9 @@ class App:
             if v is None:
                 sigtxt = '?'
             else:
-                bars = ('████' if v >= -55 else '▄▄▆ ' if v >= -65
-                        else '▂▄  ' if v >= -75 else '▂   ')
-                sigtxt = '%s %d' % (bars, v)
+                bars = ('████' if v >= -55 else '▄▄▆' if v >= -65
+                        else '▂▄' if v >= -75 else '▂')
+                sigtxt = bars
             res.append((a['ssid'] or '(hidden)', b.upper(), str(a['ch']), sigtxt))
         try:
             res.sort(key=lambda x: int(x[2]) if x[2].isdigit() else 99)
@@ -706,7 +706,7 @@ class App:
                 elif ssid in captured:
                     stat = '📦 已抓包'
                 else:
-                    stat = ''
+                    stat = '⚪ 未抓包'
                 self.tree.insert('', 'end', values=(ssid, ch, sig, stat))
             if self.target:
                 for i, (ssid, bssid, ch, sig) in enumerate(self.aps):
