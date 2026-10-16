@@ -79,6 +79,7 @@ class App:
         self._build()
         self._q = queue.Queue()
         self.root.after(40, self._drain)
+        self.root.after(5000, self._selfcheck_tick)
         if os.environ.get('MACAPP_UI_ONLY'):
             self._log('UI-only 模式（除錯）')
         else:
@@ -399,6 +400,13 @@ class App:
                     pass
             self._ui_selfcheck()
         self._ui(_do)
+
+    def _selfcheck_tick(self):
+        try:
+            self._ui_selfcheck()
+        except Exception:
+            pass
+        self.root.after(10000, self._selfcheck_tick)
 
     # ================= USB / VM =================
     def _usb_vm_loop(self):
@@ -864,6 +872,11 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
         out = (r.stdout or b'').decode('utf-8', 'replace') + \
               (r.stderr or b'').decode('utf-8', 'replace')
         lines = out.splitlines()
+        cap_part = []
+        for line in lines:
+            if '===CONVERT===' in line:
+                break
+            cap_part.append(line)
         hash_lines, in_hash = [], False
         for line in lines:
             if '===HASH===' in line:
@@ -881,6 +894,9 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                        '只送 %s 相關的 %d 行' % (ssid, len(self._target_lines())))
         if not self._target_lines():
             self._log('   本輪沒抓到 %s 的握手包 — 再抓一輪' % ssid)
+            for l in cap_part[-4:]:
+                if l.strip():
+                    self._log('   抓包器: %s' % l.strip()[:110])
             time.sleep(3)
             return
         # ---- 3. post (Windows 決定: 秒回 / 自動解 / 掛起待確認) ----
