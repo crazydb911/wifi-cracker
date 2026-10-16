@@ -116,7 +116,7 @@ class App:
             except Exception as e:
                 lines.append("tree_err=%s" % e)
             try:
-                lines.append("target=%r phase=%s aps=%d" % (self.target, self.phase[0] if self.phase else '?', len(self.aps)))
+                lines.append("target=%r phase=%r aps=%d" % (self.target, self.phase, len(self.aps)))
             except Exception:
                 pass
             lines.append("t=%s" % _t.strftime("%H:%M:%S"))
@@ -351,6 +351,11 @@ class App:
         self.root.after(40, self._drain)
 
     def _log(self, msg):
+        try:
+            with open('/tmp/mac_wifi_events.log', 'a') as f:
+                f.write(time.strftime('%H:%M:%S ') + msg + '\n')
+        except Exception:
+            pass
         def _do():
             try:
                 self.log.config(state='normal')
