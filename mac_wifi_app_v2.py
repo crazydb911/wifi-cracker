@@ -563,7 +563,7 @@ class App:
                     self._startup_vm()
             else:
                 self._zero_scans = 0
-            for _ in range(6):
+            for _ in range(2):
                 if self._stop.is_set():
                     return
                 time.sleep(1)
@@ -579,7 +579,7 @@ class App:
                   'for ch in 1 6 11; do\n' +
                   CH + '  /usr/sbin/iw dev wlan0 set channel $ch 2>/dev/null\n' +
                   CH + '  rm -f /tmp/bc_$ch.pcap\n' +
-                  CH + '  timeout 5 /usr/bin/tcpdump -i wlan0 -s 160 -w /tmp/bc_$ch.pcap 2>/dev/null\n' +
+                  CH + '  timeout 3 /usr/bin/tcpdump -i wlan0 -s 160 -w /tmp/bc_$ch.pcap 2>/dev/null\n' +
                   '  echo "MARK:$ch"\n' +
                   CH + '  /usr/bin/tcpdump -r /tmp/bc_$ch.pcap -e -n 2>/dev/null\n' +
                   'done\n')
