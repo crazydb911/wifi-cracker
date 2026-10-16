@@ -432,9 +432,13 @@ class App:
     def hotadd_adapter(self):
         try:
             subprocess.run(
-                ['sh', '-c', 'printf "device_add usb-host,vendorid=0x148f,'
-                             'productid=0x5572,id=wifiA\\n" | nc -U -w 3 ' + MON_SOCK],
-                capture_output=True, timeout=10)
+                ['sh', '-c',
+                 'printf "device_del wifiBoot\\ndevice_del wifiA\\n" | '
+                 'nc -U -w 3 ' + MON_SOCK +
+                 '; sleep 1; printf "device_add usb-host,bus=xhci.0,'
+                 'vendorid=0x148f,productid=0x5572,id=wifiA\\n" | '
+                 'nc -U -w 3 ' + MON_SOCK],
+                capture_output=True, timeout=20)
             time.sleep(4)
             return self.wlan_ok()
         except Exception:
@@ -471,7 +475,7 @@ class App:
                '-netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-10.0.2.15:22 '
                '-device virtio-net-pci,netdev=n0 '
                '-device qemu-xhci,id=xhci '
-               '-device usb-host,bus=xhci.0,vendorid=0x148f,productid=0x5572 '
+               '-device usb-host,bus=xhci.0,vendorid=0x148f,productid=0x5572,id=wifiBoot '
                '-display none -monitor unix:%s,server,nowait'
                % (QEMU_BIN, QCOW2, KERNEL, INITRD, SERIAL_LOG, MON_SOCK))
         subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL,
