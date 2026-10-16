@@ -665,9 +665,7 @@ class App:
             if v is None:
                 sigtxt = '?'
             else:
-                bars = ('████' if v >= -55 else '▄▄▆' if v >= -65
-                        else '▂▄' if v >= -75 else '▂')
-                sigtxt = bars
+                sigtxt = str(v) if v is not None else '?'
             res.append((a['ssid'] or '(hidden)', b.upper(), str(a['ch']), sigtxt))
         try:
             res.sort(key=lambda x: int(x[2]) if x[2].isdigit() else 99)
@@ -698,6 +696,9 @@ class App:
             return
         self._last_aps = list(self.aps)
         cracked, captured = self._known()
+        for tag, col in (('s4', '#34d399'), ('s3', '#a3e635'),
+                         ('s2', '#fbbf24'), ('s1', '#f87171')):
+            self.tree.tag_configure(tag, foreground=col)
         def _do():
             self.tree.delete(*self.tree.get_children())
             for ssid, bssid, ch, sig in self.aps:
@@ -706,8 +707,15 @@ class App:
                 elif ssid in captured:
                     stat = '📦 已抓包'
                 else:
-                    stat = '⚪ 未抓包'
-                self.tree.insert('', 'end', values=(ssid, ch, sig, stat))
+                    stat = ''
+                try:
+                    v = int(sig)
+                except (TypeError, ValueError):
+                    v = -99
+                lvl = ('s4' if v >= -55 else 's3' if v >= -65
+                       else 's2' if v >= -75 else 's1')
+                self.tree.insert('', 'end', values=(ssid, ch, '📶', stat),
+                                 tags=(lvl,))
             if self.target:
                 for i, (ssid, bssid, ch, sig) in enumerate(self.aps):
                     if bssid == self.target[1]:
