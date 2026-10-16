@@ -714,7 +714,8 @@ class App:
                     v = -99
                 lvl = ('s4' if v >= -55 else 's3' if v >= -65
                        else 's2' if v >= -75 else 's1')
-                self.tree.insert('', 'end', values=(ssid, ch, '📶', stat),
+                bars = {'s4': '▂▄▆█', 's3': '▂▄▆', 's2': '▂▄', 's1': '▂'}[lvl]
+                self.tree.insert('', 'end', values=(ssid, ch, bars, stat),
                                  tags=(lvl,))
             if self.target:
                 for i, (ssid, bssid, ch, sig) in enumerate(self.aps):
