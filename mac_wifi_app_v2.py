@@ -189,7 +189,7 @@ class App:
         self.tree.heading('stat', text='狀態')
         self.tree.column('ssid', anchor='w', stretch=True)
         self.tree.column('ch', width=42, anchor='center', stretch=False)
-        self.tree.column('sig', width=52, anchor='center', stretch=False)
+        self.tree.column('sig', width=86, anchor='center', stretch=False)
         self.tree.column('stat', width=76, anchor='center', stretch=False)
         st.configure('Dark.Treeview', background=C_CARD, fieldbackground=C_CARD,
              foreground=C_TEXT, rowheight=30, font=FONT)
@@ -638,15 +638,28 @@ class App:
             bssid = mb.group(1).replace(':', '').lower()
             ms = re.search(r'Beacon \(([^)]*)\)', ls)
             ssid = ms.group(1).strip() if ms else ''
+            mv = re.search(r'(-?\d+)dBm', ls)
+            v = int(mv.group(1)) if mv else None
             if bssid not in aps:
-                aps[bssid] = {'ssid': ssid, 'ch': ch}
+                aps[bssid] = {'ssid': ssid, 'ch': ch, 'sig': v}
                 order.append(bssid)
-            elif ssid and not aps[bssid]['ssid']:
-                aps[bssid]['ssid'] = ssid
+            else:
+                if ssid and not aps[bssid]['ssid']:
+                    aps[bssid]['ssid'] = ssid
+                if v is not None and (aps[bssid]['sig'] is None
+                                      or v > aps[bssid]['sig']):
+                    aps[bssid]['sig'] = v
         res = []
         for b in order:
             a = aps[b]
-            res.append((a['ssid'] or '(hidden)', b.upper(), str(a['ch']), ''))
+            v = a.get('sig')
+            if v is None:
+                sigtxt = '?'
+            else:
+                bars = ('████' if v >= -55 else '▄▄▆ ' if v >= -65
+                        else '▂▄  ' if v >= -75 else '▂   ')
+                sigtxt = '%s %d' % (bars, v)
+            res.append((a['ssid'] or '(hidden)', b.upper(), str(a['ch']), sigtxt))
         try:
             res.sort(key=lambda x: int(x[2]) if x[2].isdigit() else 99)
         except Exception:
