@@ -776,7 +776,7 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                   CH + 'ifconfig wlan0 up 2>/dev/null\nsleep 3\n' +
                   'timeout %d ' % dur +
                   CH + 'hcxdumptool -i wlan0 -w /tmp/scan_%d ' % rnd +
-                  '-F -t 7 --rds=2 2>&1 | tail -15\n' +
+                  '' + str(ch) + 'a -t 7 --rds=2 2>&1 | tail -15\n' +
                   'echo "===CONVERT==="\n' +
                   CH + 'hcxpcapngtool -o /tmp/scan_%d.22000 /tmp/scan_%d '
                        '2>&1 | tail -4\n' % (rnd, rnd) +
