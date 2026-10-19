@@ -1045,7 +1045,9 @@ class App:
                     fp = 100.0 * len(fh) / len(full) if full else 0
                     rp = 100.0 * len(rh) / len(reach) if reach else 0
                     self._ev('cov', 'list=%.0f %d/%d reach=%.0f %d/%d'
-                             % (fp, len(fh), len(full), rp, len(rh), len(reach)))
+                             ' hits=%s'
+                             % (fp, len(fh), len(full), rp, len(rh),
+                                len(reach), ','.join(sorted(fh))))
                     self.set_phase('scan', '加權巡掃（AP多頻道駐留久）',
                                    '🎯 列表覆蓋 %.0f%%（%d/%d）'
                                    % (fp, len(fh), len(full)))
