@@ -977,12 +977,17 @@ class App:
 
     def _sweep_round(self):
         chans = {}
-        for (_s, _b, c, _g) in self.aps:
+        for _b, v in self.aps_seen.items():
             try:
-                c = int(c)
+                c = int(v[1])
             except (TypeError, ValueError):
                 continue
-            chans[c] = chans.get(c, 0) + 1
+            g = v[2] if v[2] is not None else -95
+            e = chans.setdefault(c, [0, -100])
+            e[0] += 1
+            if g > e[1]:
+                e[1] = g
+        chans = {c: (n + max(0, g + 90) // 2) for c, (n, g) in chans.items()}
         if not chans:
             chans = {1: 1, 6: 1, 11: 1}
         script = (BIND +
@@ -992,8 +997,9 @@ class App:
                   CH + 'iw dev wlan0 set type monitor 2>/dev/null\n' +
                   CH + 'ifconfig wlan0 up 2>/dev/null\n')
         total = 0
-        for i, (c, n) in enumerate(sorted(chans.items())):
-            dwell = min(40, 10 + 5 * n)
+        for i, (c, w) in enumerate(sorted(chans.items(),
+                                          key=lambda kv: -kv[1])):
+            dwell = min(45, 8 + 3 * w)
             total += dwell + 6
             script += ('timeout %d ' % (dwell + 4) +
                        CH + 'hcxdumptool -i wlan0 -c %da '
