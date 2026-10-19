@@ -968,9 +968,10 @@ class App:
             self._running.clear()
 
     def _coverage(self):
-        hits = self._traffic_bssids()
-        full = set(self.aps_seen.keys())
-        reach = {b for b, v in self.aps_seen.items()
+        # 物理機去虛擬化: 同機多BSSID只差前3字節, 以末3字節為物理鍵
+        hits = {b[-6:] for b in self._traffic_bssids()}
+        full = {b[-6:] for b in self.aps_seen.keys()}
+        reach = {b[-6:] for b, v in self.aps_seen.items()
                  if v[2] is not None and v[2] >= -75}
         return full, reach, hits
 
@@ -994,11 +995,10 @@ class App:
         for i, (c, n) in enumerate(sorted(chans.items())):
             dwell = min(40, 10 + 5 * n)
             total += dwell + 6
-            script += (CH + 'iw dev wlan0 set channel %d 2>/dev/null\n'
-                       'sleep 2\n' % c +
-                       'timeout %d ' % (dwell + 4) +
-                       CH + 'hcxdumptool -i wlan0 -w /tmp/sw_%d.pcapng '
-                            '-t %d --rds=2 2>/dev/null\n' % (i, dwell))
+            script += ('timeout %d ' % (dwell + 4) +
+                       CH + 'hcxdumptool -i wlan0 -c %da '
+                            '-w /tmp/sw_%d.pcapng -t %d --rds=2 '
+                            '2>/dev/null\n' % (c, i, dwell))
         script += (CH + 'hcxpcapngtool -o /tmp/sw.22000 /tmp/sw_*.pcapng '
                    '2>/dev/null\n' +
                    CH + 'cat /tmp/sw.22000 2>/dev/null\n')
