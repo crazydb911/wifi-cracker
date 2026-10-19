@@ -1005,7 +1005,7 @@ class App:
                        CH + 'hcxdumptool -i wlan0 -c %da '
                             '-w /tmp/sw_%d.pcapng -t %d --rds=2 '
                             '2>/dev/null\n' % (c, i, dwell))
-        script += (CH + 'hcxpcapngtool -o /tmp/sw.22000 /tmp/sw_*.pcapng '
+        script += (CH + 'hcxpcapngtool --all -o /tmp/sw.22000 /tmp/sw_*.pcapng '
                    '2>/dev/null\n' +
                    CH + 'cat /tmp/sw.22000 2>/dev/null\n')
         try:
@@ -1073,7 +1073,7 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                    CH + 'hcxdumptool -i wlan0 -w /tmp/scan_%d '
                         '-t 7 --rds=2 2>&1 | tail -15\n' % rnd +
                   'echo "===CONVERT==="\n' +
-                  CH + 'hcxpcapngtool -o /tmp/scan_%d.22000 /tmp/scan_%d '
+                  CH + 'hcxpcapngtool --all -o /tmp/scan_%d.22000 /tmp/scan_%d '
                        '2>&1 | tail -4\n' % (rnd, rnd) +
                   'echo "===HASH==="\n' +
                   CH + 'cat /tmp/scan_%d.22000 2>/dev/null\n' % rnd +
