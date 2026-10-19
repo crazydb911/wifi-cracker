@@ -966,6 +966,7 @@ class App:
                     break
         finally:
             self._running.clear()
+            self.target = None
 
     def _coverage(self):
         # 物理機去虛擬化: 同機多BSSID只差前3字節, 以末3字節為物理鍵
@@ -1131,11 +1132,15 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                 miss = getattr(self, '_tgt_miss', 0) + 1
                 self._tgt_miss = miss
                 if miss >= 5:
-                    self.set_phase('cap',
+                    self.set_phase('done',
                         '⚠️ %s 連續 %d 輪無握手包' % (ssid, miss),
-                        '這 AP 可能沒有裝置在連 — 換一個有流量的 AP 試試',
-                        C_RED)
+                        '這 AP 沒有裝置在連 — 已交還巡掃', C_RED)
                     self._ev('tgtmiss', 'ssid=%s miss=%d raw=%d' % (ssid, miss, raw))
+                    self.target = None
+                    try:
+                        open('/tmp/mac_wifi_autotarget', 'w').close()
+                    except Exception:
+                        pass
                 time.sleep(3)
                 return
             self._ev('capfail', 'round=%d capout=%r' % (
