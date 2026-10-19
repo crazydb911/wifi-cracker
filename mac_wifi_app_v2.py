@@ -77,6 +77,7 @@ class App:
         self.aps = []          # [(ssid, bssid, ch, sig)]
         self.target = None     # (ssid, bssid, ch)
         self._cap_lock = threading.Lock()
+        self.aps_seen = {}  # bssid -> [ssid, ch, best_sig, last_ts]
         self.hash_pool = set() # hashes for current target
         self.phase = ('idle', '等待選定 Wi-Fi')
         self._boot_lock = threading.Lock()
@@ -698,6 +699,24 @@ class App:
                 for a in aps[:20]:
                     f.write('  ' + str(a[0]) + ' ' + str(a[1]) + ' ch' + str(a[2]) + ' ' + str(a[3]) + '\n')
             self.aps = aps
+            _now = time.time()
+            for (ssid, b, ch, g) in aps:
+                bl = b.lower()
+                try:
+                    gv = int(g)
+                except (TypeError, ValueError):
+                    gv = None
+                old = self.aps_seen.get(bl)
+                if old is None:
+                    self.aps_seen[bl] = [ssid, ch, gv, _now]
+                else:
+                    old[3] = _now
+                    if gv is not None and (old[2] is None or gv > old[2]):
+                        old[2] = gv
+                    if ssid and ssid != '(hidden)':
+                        old[0] = ssid
+            for k in [k for k, v in self.aps_seen.items() if _now - v[3] > 3600]:
+                self.aps_seen.pop(k, None)
             if not self.target and not self._running.is_set():
                 try:
                     at = open('/tmp/mac_wifi_autotarget').read().strip()
@@ -950,16 +969,9 @@ class App:
 
     def _coverage(self):
         hits = self._traffic_bssids()
-        full = set()
-        reach = set()
-        for (_s, b, _c, g) in self.aps:
-            bl = b.lower()
-            full.add(bl)
-            try:
-                if int(g) >= -75:
-                    reach.add(bl)
-            except (TypeError, ValueError):
-                pass
+        full = set(self.aps_seen.keys())
+        reach = {b for b, v in self.aps_seen.items()
+                 if v[2] is not None and v[2] >= -75}
         return full, reach, hits
 
     def _sweep_round(self):
