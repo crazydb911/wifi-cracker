@@ -38,6 +38,8 @@ BIND = ('mount --bind /proc /newroot/proc 2>/dev/null; '
 LOCAL_DIR = os.path.expanduser('~/MacCapture/captures')
 CAPSTORE  = os.path.expanduser('~/wifi_cracker/capstore')
 HASHSTORE = os.path.expanduser('~/wifi_cracker/hashstore')
+SILENT    = os.path.expanduser('~/wifi_cracker/silent_aps.txt')
+APS_SEEN  = os.path.expanduser('~/wifi_cracker/aps_seen.json')
 UQUEUE    = os.path.expanduser('~/wifi_cracker/upload_queue.json')
 APP_LOCK  = '/tmp/mac_wifi_app.lock'
 DEFAULT_WIP, DEFAULT_PORT, DEFAULT_DUR = '100.94.10.122', '8766', '45'
@@ -78,6 +80,13 @@ class App:
         self.target = None     # (ssid, bssid, ch)
         self._cap_lock = threading.Lock()
         self.aps_seen = {}  # bssid -> [ssid, ch, best_sig, last_ts]
+        try:
+            with open(APS_SEEN) as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                self.aps_seen.update(d)
+        except Exception:
+            pass
         self.hash_pool = set() # hashes for current target
         self.phase = ('idle', '等待選定 Wi-Fi')
         self._boot_lock = threading.Lock()
@@ -717,13 +726,22 @@ class App:
                         old[0] = ssid
             for k in [k for k, v in self.aps_seen.items() if _now - v[3] > 3600]:
                 self.aps_seen.pop(k, None)
+            try:
+                with open(APS_SEEN, 'w') as f:
+                    json.dump(self.aps_seen, f)
+            except Exception:
+                pass
             if not self.target and not self._running.is_set():
                 try:
                     at = open('/tmp/mac_wifi_autotarget').read().strip()
                 except Exception:
                     at = ''
                 if at:
+                    sil = self._silent_set()
+                    ckd = self._known()[0]
                     for t in aps:
+                        if t[1].lower() in sil or ckd.get(t[0]):
+                            continue
                         if t[1] == at or t[0] == at or at.lower() in t[0].lower():
                             self.target = (t[0], t[1], t[2])
                             self._tgt_miss = 0
@@ -968,6 +986,21 @@ class App:
             self._running.clear()
             self.target = None
 
+    def _silent_set(self):
+        # tgtmiss 記錄的靜音 AP, 24 小時後自動過期
+        import time as _t
+        now = _t.time()
+        out = set()
+        try:
+            with open(SILENT) as f:
+                for l in f:
+                    p = l.split()
+                    if len(p) >= 2 and now - float(p[1]) < 86400:
+                        out.add(p[0].lower())
+        except OSError:
+            pass
+        return out
+
     def _coverage(self):
         # 物理機去虛擬化: 同機多BSSID只差前3字節, 以末3字節為物理鍵
         hits = {b[-6:] for b in self._traffic_bssids()}
@@ -978,7 +1011,10 @@ class App:
 
     def _sweep_round(self):
         chans = {}
+        sil = self._silent_set()
         for _b, v in self.aps_seen.items():
+            if _b.lower() in sil:
+                continue
             try:
                 c = int(v[1])
             except (TypeError, ValueError):
@@ -1058,6 +1094,11 @@ class App:
             self._sweep_on = False
 
     def _round(self, rnd, ssid, bssid, ch, wip, port, dur):
+        ckd = self._known()[0]
+        if ckd.get(ssid):
+            self.set_phase('done', '已破解: %s' % ckd[ssid],
+                           '%s 之前已解出' % ssid)
+            return
         if not self.boot_vm_if_needed():
             self.set_phase('cap', '虛擬機未就緒，等待...', '重試中')
             time.sleep(15)
@@ -1138,6 +1179,11 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                         '⚠️ %s 連續 %d 輪無握手包' % (ssid, miss),
                         '這 AP 沒有裝置在連 — 已交還巡掃', C_RED)
                     self._ev('tgtmiss', 'ssid=%s miss=%d raw=%d' % (ssid, miss, raw))
+                    try:
+                        with open(SILENT, 'a') as f:
+                            f.write('%s %d\n' % (bssid.lower(), int(time.time())))
+                    except Exception:
+                        pass
                     self.target = None
                     try:
                         open('/tmp/mac_wifi_autotarget', 'w').close()

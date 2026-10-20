@@ -334,9 +334,9 @@ def crack_hashes(hash_file, wordlist_key, rules_key=None, mode="0", mask=None):
 
 # Multi-stage auto-escalation sequence
 STAGES = [
+    {"name": "手機門號 09xxxxxxxx", "wordlist": None, "rules": None, "mask": "09?d?d?d?d?d?d?d?d", "mode": "mask"},
     {"name": "wifi_wordlist straight", "wordlist": "wifi_wordlist", "rules": None, "mask": None, "mode": "0"},
     {"name": "rockyou plain", "wordlist": "rockyou", "rules": None, "mask": None, "mode": "0"},
-    {"name": "手機門號 09xxxxxxxx", "wordlist": None, "rules": None, "mask": "09?d?d?d?d?d?d?d?d", "mode": "mask"},
     {"name": "8 位純數字", "wordlist": None, "rules": None, "mask": "?d?d?d?d?d?d?d?d", "mode": "mask"},
     {"name": "rockyou + best66", "wordlist": "rockyou", "rules": "best66", "mask": None, "mode": "0"},
     {"name": "10 位純數字（長攻）", "wordlist": None, "rules": None, "mask": "?d?d?d?d?d?d?d?d?d?d", "mode": "mask"},
