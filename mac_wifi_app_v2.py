@@ -1649,6 +1649,19 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
             aps.append({'ssid': ssid, 'bssid': bssid, 'ch': ch,
                         'sig': sig, 'hash': bssid.lower()[-6:] in hits,
                         'pw': ckd.get(ssid) or ''})
+        if not aps:
+            for bb, v in self.aps_seen.items():
+                ssid = v[0] or '(hidden)'
+                aps.append({'ssid': ssid + ' *', 'bssid': bb, 'ch': v[1],
+                            'sig': v[2],
+                            'hash': bb.lower()[-6:] in hits,
+                            'pw': ckd.get(ssid) or ''})
+            def _sg(a):
+                try:
+                    return int(a['sig'])
+                except (ValueError, TypeError):
+                    return -999
+            aps.sort(key=_sg, reverse=True)
         q = self._load_queue()
         return {'cov': {'pct': round(100.0 * len(fh) / len(full), 1)
                         if full else 0, 'hit': len(fh), 'total': len(full)},
@@ -1732,7 +1745,11 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
         return head + body + js + '</body></html>'
 
     def web_target(self, bssid):
-        for (ssid, b, ch, sig) in self.aps:
+        cands = [(s, b, c, g) for (s, b, c, g) in self.aps]
+        for bb, v in self.aps_seen.items():
+            if all(c[1].lower() != bb.lower() for c in cands):
+                cands.append((v[0] or '(hidden)', bb, v[1], v[2]))
+        for (ssid, b, ch, sig) in cands:
             if b.lower() == bssid.lower():
                 self.target = (ssid, b, ch)
                 self._tgt_miss = 0
