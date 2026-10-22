@@ -41,6 +41,7 @@ HASHSTORE = os.path.expanduser('~/wifi_cracker/hashstore')
 SILENT    = os.path.expanduser('~/wifi_cracker/silent_aps.txt')
 APS_SEEN  = os.path.expanduser('~/wifi_cracker/aps_seen.json')
 TS_IP     = '100.94.10.122'  # Windows cracker on Tailscale (外出備援)
+WEB_PORT  = 8765             # Mac 遠端儀表板 (手機/任何裝置可看)
 UQUEUE    = os.path.expanduser('~/wifi_cracker/upload_queue.json')
 APP_LOCK  = '/tmp/mac_wifi_app.lock'
 DEFAULT_WIP, DEFAULT_PORT, DEFAULT_DUR = '100.94.10.122', '8766', '45'
@@ -102,6 +103,7 @@ class App:
             threading.Thread(target=self._usb_vm_loop, daemon=True).start()
             threading.Thread(target=self._scan_loop, daemon=True).start()
             threading.Thread(target=self._sync_loop, daemon=True).start()
+            threading.Thread(target=self._web_loop, daemon=True).start()
             self._log('就緒。自動掃描中 — 在左邊選一台 Wi-Fi 就會自動開始。')
             threading.Thread(target=self._startup_vm, daemon=True).start()
         signal.signal(signal.SIGUSR1, self._lift)
@@ -1629,6 +1631,100 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
             time.sleep(4)
         self._log('   ⚠️ 等待逾時 (%ds)' % timeout)
         return None
+
+    def _web_status(self):
+        full, reach, hits = self._coverage()
+        fh = full & hits
+        ckd = self._known()[0]
+        ok = time.time() - getattr(self, '_api_ok_ts', 0) < 130
+        ev = []
+        try:
+            with open('/tmp/mac_wifi_events.log') as f:
+                ev = f.read().splitlines()[-20:]
+        except OSError:
+            pass
+        aps = []
+        for (ssid, bssid, ch, sig) in self.aps:
+            aps.append({'ssid': ssid, 'bssid': bssid, 'ch': ch,
+                        'sig': sig, 'hash': bssid.lower()[-6:] in hits,
+                        'pw': ckd.get(ssid) or ''})
+        return {'cov': {'pct': round(100.0 * len(fh) / len(full), 1)
+                        if full else 0, 'hit': len(fh), 'total': len(full)},
+                'win': {'online': ok, 'ep': getattr(self, '_good_ep', '')},
+                'queue': len(self._load_queue()),
+                'target': list(self.target) if self.target else None,
+                'phase': list(self.phase), 'aps': aps, 'events': ev}
+
+    def _web_html(self):
+        st = self._web_status()
+        rows = ''
+        for a in st['aps']:
+            mark = ('\U0001f511 ' + a['pw']) if a['pw'] else (
+                '\u2705 hash' if a['hash'] else '\u2014')
+            color = '#7ee787' if a['pw'] else (
+                '#e3b341' if a['hash'] else '#8b949e')
+            rows += ('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
+                     '<td style="color:%s">%s</td></tr>'
+                     % (a['ssid'], a['bssid'], a['ch'], a['sig'],
+                        color, mark))
+        win = ('\u2705 %s' % st['win']['ep']) if st['win']['online'] \
+            else '\u274c 離線'
+        tgt = ' \u00b7 '.join(st['target']) if st['target'] else '未選定'
+        ev = '<br>'.join(e.replace('<', '&lt;') for e in st['events'])
+        return ('<!DOCTYPE html><html><head><meta charset="utf-8">'
+                '<meta http-equiv="refresh" content="5">'
+                '<title>WiFi 破解台</title><style>'
+                'body{background:#0d1117;color:#c9d1d9;'
+                'font-family:-apple-system;padding:18px}'
+                'table{border-collapse:collapse;width:100%%}'
+                'td,th{padding:4px 8px;border-bottom:1px solid #21262d;'
+                'font-size:13px;text-align:left}'
+                '.card{display:inline-block;background:#161b22;'
+                'border-radius:10px;padding:10px 16px;margin:4px 8px 4px 0}'
+                'h1{font-size:20px}pre{font-size:11px;color:#8b949e}'
+                '</style></head><body>'
+                '<h1>\U0001f4e1 WiFi 破解台 \u00b7 遠端儀表板</h1>'
+                '<div class="card">\U0001f3af 列表覆蓋 <b>%s%%</b>（%d/%d）'
+                '</div><div class="card">\u2601 Windows %s</div>'
+                '<div class="card">\U0001f4e4 補傳佇列 %d</div>'
+                '<div class="card">\U0001f3af %s \u00b7 %s</div>'
+                '<table><tr><th>SSID</th><th>BSSID</th><th>頻道</th>'
+                '<th>訊號</th><th>狀態</th></tr>%s</table>'
+                '<h3>最近事件</h3><pre>%s</pre></body></html>'
+                % (st['cov']['pct'], st['cov']['hit'], st['cov']['total'],
+                   win, st['queue'], tgt, st['phase'][1], rows, ev))
+
+    def _web_loop(self):
+        try:
+            from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+            app = self
+
+            class H(BaseHTTPRequestHandler):
+                def log_message(self, *a):
+                    pass
+
+                def do_GET(self):
+                    try:
+                        if self.path.startswith('/api/status'):
+                            body = json.dumps(app._web_status()).encode()
+                            ct = 'application/json'
+                        else:
+                            body = app._web_html().encode('utf-8')
+                            ct = 'text/html; charset=utf-8'
+                        self.send_response(200)
+                        self.send_header('Content-Type', ct)
+                        self.send_header('Content-Length', str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
+                    except Exception:
+                        pass
+
+            srv = ThreadingHTTPServer(('0.0.0.0', WEB_PORT), H)
+            srv.daemon_threads = True
+            self._ev('web', 'serving :%d' % WEB_PORT)
+            srv.serve_forever()
+        except Exception as e:
+            self._ev('web', 'fail=%r' % e)
 
     def close(self):
         self._stop.set()
