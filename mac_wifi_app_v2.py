@@ -322,6 +322,7 @@ class App:
         self._log('[%s] %s' % (self._phase_name(key), sub or text))
 
     def _result(self, text, color):
+        self._last_result = text
         self._ui(lambda: self._set_text(self.lbl_result, text, color))
 
     # ================= UI thread helpers =================
@@ -1648,52 +1649,122 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
             aps.append({'ssid': ssid, 'bssid': bssid, 'ch': ch,
                         'sig': sig, 'hash': bssid.lower()[-6:] in hits,
                         'pw': ckd.get(ssid) or ''})
+        q = self._load_queue()
         return {'cov': {'pct': round(100.0 * len(fh) / len(full), 1)
                         if full else 0, 'hit': len(fh), 'total': len(full)},
                 'win': {'online': ok, 'ep': getattr(self, '_good_ep', '')},
-                'queue': len(self._load_queue()),
+                'queue': len(q),
+                'queue_list': [{'ssid': v.get('ssid', ''), 'bssid': k}
+                               for k, v in q.items()],
+                'cfg': {'wip': self.var['wip'].get(),
+                        'port': self.var['port'].get(),
+                        'dur': self.var['dur'].get()},
+                'sweep': bool(getattr(self, '_sweep_on', False)),
+                'result': getattr(self, '_last_result', ''),
                 'target': list(self.target) if self.target else None,
                 'phase': list(self.phase), 'aps': aps, 'events': ev}
 
     def _web_html(self):
-        st = self._web_status()
-        rows = ''
-        for a in st['aps']:
-            mark = ('\U0001f511 ' + a['pw']) if a['pw'] else (
-                '\u2705 hash' if a['hash'] else '\u2014')
-            color = '#7ee787' if a['pw'] else (
-                '#e3b341' if a['hash'] else '#8b949e')
-            rows += ('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
-                     '<td style="color:%s">%s</td></tr>'
-                     % (a['ssid'], a['bssid'], a['ch'], a['sig'],
-                        color, mark))
-        win = ('\u2705 %s' % st['win']['ep']) if st['win']['online'] \
-            else '\u274c 離線'
-        tgt = ' \u00b7 '.join(st['target']) if st['target'] else '未選定'
-        ev = '<br>'.join(e.replace('<', '&lt;') for e in st['events'])
-        return ('<!DOCTYPE html><html><head><meta charset="utf-8">'
-                '<meta http-equiv="refresh" content="5">'
-                '<title>WiFi 破解台</title><style>'
+        cfg = self._web_status()['cfg']
+        head = ('<!DOCTYPE html><html><head><meta charset="utf-8">'
+                '<title>WiFi 破解台 · 遠端控制台</title><style>'
                 'body{background:#0d1117;color:#c9d1d9;'
                 'font-family:-apple-system;padding:18px}'
-                'table{border-collapse:collapse;width:100%%}'
+                'table{border-collapse:collapse;width:100%}'
                 'td,th{padding:4px 8px;border-bottom:1px solid #21262d;'
                 'font-size:13px;text-align:left}'
                 '.card{display:inline-block;background:#161b22;'
                 'border-radius:10px;padding:10px 16px;margin:4px 8px 4px 0}'
                 'h1{font-size:20px}pre{font-size:11px;color:#8b949e}'
-                '</style></head><body>'
-                '<h1>\U0001f4e1 WiFi 破解台 \u00b7 遠端儀表板</h1>'
-                '<div class="card">\U0001f3af 列表覆蓋 <b>%s%%</b>（%d/%d）'
-                '</div><div class="card">\u2601 Windows %s</div>'
-                '<div class="card">\U0001f4e4 補傳佇列 %d</div>'
-                '<div class="card">\U0001f3af %s \u00b7 %s</div>'
-                '<table><tr><th>SSID</th><th>BSSID</th><th>頻道</th>'
-                '<th>訊號</th><th>狀態</th></tr>%s</table>'
-                '<h3>最近事件</h3><pre>%s</pre></body></html>'
-                % (st['cov']['pct'], st['cov']['hit'], st['cov']['total'],
-                   win, st['queue'], tgt, st['phase'][1], rows, ev))
+                'button{background:#238636;color:#fff;border:0;'
+                'border-radius:6px;padding:5px 12px;font-size:12px;'
+                'cursor:pointer;margin:2px}'
+                'button.stop{background:#da3633}'
+                'input{background:#0d1117;color:#c9d1d9;'
+                'border:1px solid #30363d;border-radius:6px;'
+                'padding:4px;font-size:12px}'
+                '</style></head><body>')
+        body = ('<h1>📡 WiFi 破解台 · 遠端控制台</h1>'
+                '<div class="card">🎯 列表覆蓋 <b id="cov">…</b></div>'
+                '<div class="card">☁ Windows <span id="win">…</span></div>'
+                '<div class="card">📤 補傳佇列 <span id="q">…</span></div>'
+                '<div class="card"><span id="tgtst">…</span></div><br>'
+                '<div id="pw" style="font-size:26px;color:#7ee787;'
+                'margin:10px 0"></div>'
+                '<button class="stop" onclick="stopAll()">■ 全部停止</button>'
+                ' Windows IP <input id="cwip" size="13" value="' +
+                cfg['wip'] + '"> Port <input id="cport" size="5" value="' +
+                cfg['port'] + '"> 抓包秒 <input id="cdur" size="3" value="' +
+                cfg['dur'] + '"> <button onclick="saveCfg()">儲存設定</button>'
+                '<table id="tb"></table>'
+                '<h3>最近事件</h3><pre id="ev"></pre>')
+        js = ('<script>'
+              'const HDR="<tr><th>SSID</th><th>BSSID</th><th>頻道</th>'
+              '<th>訊號</th><th>狀態</th><th>動作</th></tr>";'
+              'async function api(p,b){const r=await fetch(p,{method:b?"POST":'
+              '"GET",headers:{"Content-Type":"application/json"},'
+              'body:b?JSON.stringify(b):null});return r.json()}'
+              'function tgt(b){api("/api/target",{bssid:b}).then(tick)}'
+              'function stopAll(){api("/api/stop",{}).then(tick)}'
+              'function saveCfg(){api("/api/config",{wip:cwip.value,'
+              'port:cport.value,dur:cdur.value}).then(tick)}'
+              'async function tick(){try{const s=await api("/api/status");'
+              'cov.textContent=s.cov.pct+"%（"+s.cov.hit+"/"+s.cov.total+"）";'
+              'win.textContent=s.win.online?("✅ "+s.win.ep):"❌ 離線";'
+              'win.style.color=s.win.online?"#7ee787":"#f85149";'
+              'q.textContent=s.queue+(s.queue_list.length?"（"+'
+              's.queue_list.map(x=>x.ssid).join(", ")+"）":"");'
+              'tgtst.textContent=(s.target?"目標 "+s.target.join(" · "):'
+              '"未選定")+" · "+s.phase[1]+(s.sweep?" · 巡掃中":"");'
+              'pw.textContent=s.result||"";'
+              'tb.innerHTML=HDR+s.aps.map(a=>{const m=a.pw?("🔑 "+a.pw):'
+              '(a.hash?"✅ hash":"—");'
+              'const c=a.pw?"#7ee787":(a.hash?"#e3b341":"#8b949e");'
+              'return "<tr><td>"+a.ssid+"</td><td>"+a.bssid+"</td><td>"+'
+              'a.ch+"</td><td>"+a.sig+"</td><td style=\\"color:"+c+"\\">"+m+'
+              '"</td><td><button data-b=\\""+a.bssid+"\\">🎯 破解</button>'
+              '</td></tr>"}).join("");'
+              'ev.textContent=s.events.join("\\n")}catch(e){}}'
+              'tb.addEventListener("click",e=>{const b=e.target.dataset.b;'
+              'if(b)tgt(b)});'
+              'setInterval(tick,5000);tick();'
+              '</script>')
+        return head + body + js + '</body></html>'
 
+    def web_target(self, bssid):
+        for (ssid, b, ch, sig) in self.aps:
+            if b.lower() == bssid.lower():
+                self.target = (ssid, b, ch)
+                self._tgt_miss = 0
+                self._ui(lambda ss=ssid: self.lbl_target.config(
+                    text=ss, fg=C_TEXT))
+                self._ui(lambda bb=b, cc=ch, gg=(sig or '?'): (
+                    self.lbl_target_sub.config(
+                        text='%s · ch%s · %s' % (bb, cc, gg))))
+                self._log('🎯 網頁選定: %s (%s ch%s) → 自動開始' % (
+                          ssid, b, ch))
+                self._ev('web', 'target=%s' % bssid)
+                pw = self._known()[0].get(ssid)
+                if pw:
+                    self.set_phase('done', '🔓 已破解（之前解過）', pw)
+                    self._result('🔓  %s' % pw, C_GREEN)
+                    return {'ok': True, 'cracked': pw}
+                if not self._running.is_set():
+                    threading.Thread(target=self._auto_loop,
+                                     args=(ssid, b, ch), daemon=True).start()
+                    return {'ok': True, 'started': True}
+                return {'ok': True, 'running': True}
+        return {'ok': False, 'err': 'AP not in scan list'}
+
+    def web_config(self, wip, port, dur):
+        if wip:
+            self.var['wip'].set(str(wip).strip())
+        if port:
+            self.var['port'].set(str(port).strip())
+        if dur:
+            self.var['dur'].set(str(dur).strip())
+        self._ev('web', 'config wip=%s port=%s dur=%s' % (wip, port, dur))
+        return {'ok': True}
     def _web_loop(self):
         try:
             from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1718,6 +1789,29 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                         self.wfile.write(body)
                     except Exception:
                         pass
+
+                def do_POST(self):
+                    try:
+                        ln = int(self.headers.get('Content-Length') or 0)
+                        d = json.loads(self.rfile.read(ln) or b'{}')
+                        if self.path == '/api/target':
+                            r = app.web_target(d.get('bssid', ''))
+                        elif self.path == '/api/stop':
+                            app.stop_all()
+                            r = {'ok': True}
+                        elif self.path == '/api/config':
+                            r = app.web_config(d.get('wip'), d.get('port'),
+                                               d.get('dur'))
+                        else:
+                            r = {'ok': False, 'err': 'unknown'}
+                    except Exception as e:
+                        r = {'ok': False, 'err': repr(e)}
+                    body = json.dumps(r).encode()
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
 
             srv = ThreadingHTTPServer(('0.0.0.0', WEB_PORT), H)
             srv.daemon_threads = True
