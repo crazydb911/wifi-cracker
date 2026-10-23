@@ -1195,6 +1195,8 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                         '⚠️ %s 連續 %d 輪無握手包' % (ssid, miss),
                         '這 AP 沒有裝置在連 — 已交還巡掃', C_RED)
                     self._ev('tgtmiss', 'ssid=%s miss=%d raw=%d' % (ssid, miss, raw))
+                    self._result('⚠️ %s 無裝置在連（靜音AP）'
+                                 ' — 黑名單24小時' % ssid, C_RED)
                     try:
                         with open(SILENT, 'a') as f:
                             f.write('%s %d\n' % (bssid.lower(), int(time.time())))
