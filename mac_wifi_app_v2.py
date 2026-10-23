@@ -39,6 +39,7 @@ LOCAL_DIR = os.path.expanduser('~/MacCapture/captures')
 CAPSTORE  = os.path.expanduser('~/wifi_cracker/capstore')
 HASHSTORE = os.path.expanduser('~/wifi_cracker/hashstore')
 APS_SEEN  = os.path.expanduser('~/wifi_cracker/aps_seen.json')
+REACH_SEEN = os.path.expanduser('~/wifi_cracker/reach_seen.json')
 TS_IP     = '100.94.10.122'  # Windows cracker on Tailscale (外出備援)
 WEB_PORT  = 8765             # Mac 遠端儀表板 (手機/任何裝置可看)
 UQUEUE    = os.path.expanduser('~/wifi_cracker/upload_queue.json')
@@ -88,7 +89,16 @@ class App:
                 self.aps_seen.update(d)
         except Exception:
             pass
+        self.reach_seen = {}
+        try:
+            with open(REACH_SEEN) as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                self.reach_seen.update(d)
+        except Exception:
+            pass
         self.hash_pool = set() # hashes for current target
+        self._tgt_cancel = threading.Event()
         self.phase = ('idle', '等待選定 Wi-Fi')
         self._boot_lock = threading.Lock()
 
@@ -103,6 +113,7 @@ class App:
             threading.Thread(target=self._scan_loop, daemon=True).start()
             threading.Thread(target=self._sync_loop, daemon=True).start()
             threading.Thread(target=self._web_loop, daemon=True).start()
+            threading.Thread(target=self._rca_loop, daemon=True).start()
             self._log('就緒。自動掃描中 — 在左邊選一台 Wi-Fi 就會自動開始。')
             threading.Thread(target=self._startup_vm, daemon=True).start()
         signal.signal(signal.SIGUSR1, self._lift)
@@ -262,6 +273,10 @@ class App:
         self.lbl_target_sub = tk.Label(tc, text='—', font=FONT,
                                        bg=C_CARD, fg=C_DIM, wraplength=430)
         self.lbl_target_sub.pack(anchor='w', pady=(2, 0))
+        tk.Button(tc, text='✖ 取消目標', command=self.target_cancel,
+                  font=FONT, fg=C_TEXT, bg='#5a4210',
+                  activebackground='#7a5a18', relief='flat',
+                  padx=10, pady=2).pack(anchor='w', pady=(6, 0))
         # phase list
         self.phases = {}
         for key, name in [('scan', '1 · 選定'), ('cap', '2 · 抓包'),
@@ -987,6 +1002,10 @@ class App:
         self.set_phase('scan', '已選定', '%s ch%s' % (bssid, ch))
         try:
             while not self._stop.is_set():
+                if self._tgt_cancel.is_set():
+                    self._tgt_cancel.clear()
+                    self._log('✖ 目標已取消 — 返回巡掃')
+                    break
                 rnd += 1
                 self._running.set()
                 try:
@@ -1006,6 +1025,75 @@ class App:
         reach = {b[-6:] for b, v in self.aps_seen.items()
                  if v[2] is not None and v[2] >= -75}
         return full, reach, hits
+
+    def _rca_loop(self):
+        while not self._stop.is_set():
+            for _ in range(120):
+                if self._stop.is_set():
+                    return
+                time.sleep(1)
+            if not self.vm_ready(timeout=8):
+                continue
+            try:
+                self._rca_round()
+            except Exception as e:
+                self._ev('rca', 'err=%r' % e)
+            for _ in range(1080):
+                if self._stop.is_set():
+                    return
+                time.sleep(1)
+
+    def _rca_round(self):
+        # rcascan=active: 只有回應我們探測請求的 AP 會列出 = 雙向可達
+        chans = {}
+        for _b, v in self.aps_seen.items():
+            try:
+                c = int(v[1])
+            except (TypeError, ValueError):
+                continue
+            g = v[2] if v[2] is not None else -95
+            chans[c] = chans.get(c, 0) + 1 + max(0, g + 90) // 20
+        if not chans:
+            chans = {1: 1, 6: 1, 11: 1}
+        top = [c for c, _w in sorted(chans.items(),
+                                     key=lambda kv: -kv[1])[:8]]
+        script = BIND
+        for c in top:
+            script += ('timeout 24 ' + CH +
+                       'hcxdumptool -i wlan0 -c %da --rcascan=active '
+                       '--rds=4 2>&1\n') % c
+        try:
+            with self._cap_lock:
+                r = subprocess.run(VM_SSH.split() + ['sh', '-s'],
+                                   input=script.encode(), capture_output=True,
+                                   timeout=len(top) * 25 + 60)
+        except Exception as e:
+            self._ev('rca', 'err=%r' % e)
+            return
+        out = (r.stdout or b'').decode('utf-8', 'replace') + \
+              (r.stderr or b'').decode('utf-8', 'replace')
+        now = int(time.time())
+        got = 0
+        for l in out.splitlines():
+            if '|' not in l:
+                continue
+            f = l.split('|')
+            if len(f) > 4:
+                x = f[4].strip().lower().replace(':', '')
+                if re.fullmatch(r'[0-9a-f]{12}', x):
+                    self.reach_seen[x] = now
+                    got += 1
+        self.reach_seen = {k: v for k, v in self.reach_seen.items()
+                          if now - v < 3600}
+        try:
+            tmp = REACH_SEEN + '.tmp'
+            with open(tmp, 'w') as f:
+                json.dump(self.reach_seen, f)
+            os.replace(tmp, REACH_SEEN)
+        except Exception:
+            pass
+        self._ev('rca', 'ch=%d resp=%d pool=%d' % (
+            len(top), got, len(self.reach_seen)))
 
     def _sweep_round(self):
         chans = {}
@@ -1623,10 +1711,13 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                 ev = f.read().splitlines()[-20:]
         except OSError:
             pass
+        bid = {k for k, v in self.reach_seen.items()
+               if time.time() - v < 3600}
         aps = []
         for (ssid, bssid, ch, sig) in self.aps:
             aps.append({'ssid': ssid, 'bssid': bssid, 'ch': ch,
                         'sig': sig, 'hash': bssid.lower()[-6:] in hits,
+                        'bidir': bssid.lower() in bid,
                         'pw': ckd.get(ssid) or ''})
         if not aps:
             for bb, v in self.aps_seen.items():
@@ -1634,6 +1725,7 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                 aps.append({'ssid': ssid + ' *', 'bssid': bb, 'ch': v[1],
                             'sig': v[2],
                             'hash': bb.lower()[-6:] in hits,
+                            'bidir': bb.lower() in bid,
                             'pw': ckd.get(ssid) or ''})
             def _sg(a):
                 try:
@@ -1672,6 +1764,7 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                 'border-radius:6px;padding:5px 12px;font-size:12px;'
                 'cursor:pointer;margin:2px}'
                 'button.stop{background:#da3633}'
+                'button.cancel{background:#9e6a03}'
                 'input{background:#0d1117;color:#c9d1d9;'
                 'border:1px solid #30363d;border-radius:6px;'
                 'padding:4px;font-size:12px}'
@@ -1684,6 +1777,7 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                 '<div id="pw" style="font-size:26px;color:#7ee787;'
                 'margin:10px 0"></div>'
                 '<button class="stop" onclick="stopAll()">■ 全部停止</button>'
+                ' <button class="cancel" onclick="cancelT()">✖ 取消目標</button>'
                 ' Windows IP <input id="cwip" size="13" value="' +
                 cfg['wip'] + '"> Port <input id="cport" size="5" value="' +
                 cfg['port'] + '"> 抓包秒 <input id="cdur" size="3" value="' +
@@ -1692,12 +1786,13 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                 '<h3>最近事件</h3><pre id="ev"></pre>')
         js = ('<script>'
               'const HDR="<tr><th>SSID</th><th>BSSID</th><th>頻道</th>'
-              '<th>訊號</th><th>狀態</th><th>動作</th></tr>";'
+              '<th>訊號</th><th>方向</th><th>狀態</th><th>動作</th></tr>";'
               'async function api(p,b){const r=await fetch(p,{method:b?"POST":'
               '"GET",headers:{"Content-Type":"application/json"},'
               'body:b?JSON.stringify(b):null});return r.json()}'
               'function tgt(b){api("/api/target",{bssid:b}).then(tick)}'
               'function stopAll(){api("/api/stop",{}).then(tick)}'
+              'function cancelT(){api("/api/cancel",{}).then(tick)}'
               'function saveCfg(){api("/api/config",{wip:cwip.value,'
               'port:cport.value,dur:cdur.value}).then(tick)}'
               'async function tick(){try{const s=await api("/api/status");'
@@ -1712,9 +1807,12 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
               'tb.innerHTML=HDR+s.aps.map(a=>{const m=a.pw?("🔑 "+a.pw):'
               '(a.hash?"✅ hash":"—");'
               'const c=a.pw?"#7ee787":(a.hash?"#e3b341":"#8b949e");'
+              'const d=a.bidir?"✅ 雙向":"⚠️ 單向";'
+              'const dc=a.bidir?"#7ee787":"#f0883e";'
               'return "<tr><td>"+a.ssid+"</td><td>"+a.bssid+"</td><td>"+'
-              'a.ch+"</td><td>"+a.sig+"</td><td style=\\"color:"+c+"\\">"+m+'
-              '"</td><td><button data-b=\\""+a.bssid+"\\">🎯 破解</button>'
+              'a.ch+"</td><td>"+a.sig+"</td><td style=\"color:"+dc+"\">"+d+'
+              '"</td><td style=\"color:"+c+"\">"+m+'
+              '"</td><td><button data-b=\""+a.bssid+"\">🎯 破解</button>'
               '</td></tr>"}).join("");'
               'ev.textContent=s.events.join("\\n")}catch(e){}}'
               'tb.addEventListener("click",e=>{const b=e.target.dataset.b;'
@@ -1732,6 +1830,7 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
             if b.lower() == bssid.lower():
                 self.target = (ssid, b, ch)
                 self._tgt_miss = 0
+                self._tgt_cancel.clear()
                 self._ui(lambda ss=ssid: self.lbl_target.config(
                     text=ss, fg=C_TEXT))
                 self._ui(lambda bb=b, cc=ch, gg=(sig or '?'): (
@@ -1751,6 +1850,17 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                     return {'ok': True, 'started': True}
                 return {'ok': True, 'running': True}
         return {'ok': False, 'err': 'AP not in scan list'}
+
+    def target_cancel(self):
+        if not self.target:
+            return {'ok': False, 'err': '目前無目標'}
+        t = self.target[0]
+        self._tgt_cancel.set()
+        self.target = None
+        self.set_phase('idle', '目標已取消', '返回巡掃')
+        self._result('✖ 已取消 %s — 返回巡掃' % t, C_DIM)
+        self._ev('cancel', t)
+        return {'ok': True}
 
     def web_config(self, wip, port, dur):
         if wip:
@@ -1792,6 +1902,8 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                         d = json.loads(self.rfile.read(ln) or b'{}')
                         if self.path == '/api/target':
                             r = app.web_target(d.get('bssid', ''))
+                        elif self.path == '/api/cancel':
+                            r = app.target_cancel()
                         elif self.path == '/api/stop':
                             app.stop_all()
                             r = {'ok': True}
