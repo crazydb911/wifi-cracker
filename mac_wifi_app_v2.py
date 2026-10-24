@@ -712,7 +712,8 @@ class App:
         script = (BIND +
                   CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                   CH + 'iw dev wlan0 set type monitor 2>/dev/null\n' +
-                  CH + 'ifconfig wlan0 up 2>/dev/null\nsleep 1\n' +
+                  CH + 'ifconfig wlan0 up 2>/dev/null\n' +
+                  CH + 'iw reg set TW 2>/dev/null\nsleep 1\n' +
                   'for ch in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do\n' +
                   CH + '  /usr/sbin/iw dev wlan0 set channel $ch 2>/dev/null\n' +
                   CH + '  rm -f /tmp/bc_$ch.pcap\n' +
@@ -1038,7 +1039,7 @@ class App:
                 self._rca_round()
             except Exception as e:
                 self._ev('rca', 'err=%r' % e)
-            for _ in range(1080):
+            for _ in range(420):
                 if self._stop.is_set():
                     return
                 time.sleep(1)
@@ -1116,7 +1117,8 @@ class App:
                      'df -m / | awk \'NR==2 && $3>430 {system("rm -rf /tmp/*")}\'\n' +
                   CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                   CH + 'iw dev wlan0 set type monitor 2>/dev/null\n' +
-                  CH + 'ifconfig wlan0 up 2>/dev/null\n')
+                  CH + 'ifconfig wlan0 up 2>/dev/null\n' +
+                  CH + 'iw reg set TW 2>/dev/null\n')
         total = 0
         for i, (c, w) in enumerate(sorted(chans.items(),
                                           key=lambda kv: -kv[1])):
@@ -1197,6 +1199,7 @@ CH + 'sh -c "rm -f /tmp/scan_*" 2>/dev/null\n' +
 CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                   CH + 'iw dev wlan0 set type monitor 2>/dev/null\n' +
                   CH + 'ifconfig wlan0 up 2>/dev/null\n' +
+                  CH + 'iw reg set TW 2>/dev/null\n' +
                   CH + 'iw dev wlan0 set channel %s 2>/dev/null\nsleep 3\n' % ch +
                   'timeout %d ' % dur +
                    CH + 'hcxdumptool -i wlan0 -c ' + str(ch) + 'a '
@@ -1752,10 +1755,17 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
     def _web_html(self):
         cfg = self._web_status()['cfg']
         head = ('<!DOCTYPE html><html><head><meta charset="utf-8">'
-                '<title>WiFi 破解台 · 遠端控制台</title><style>'
+                '<title>WiFi 破解台 · 遠端控制台</title>'
+                '<meta name="viewport" content="width=device-width,'
+                'initial-scale=1">'
+                '<style>'
                 'body{background:#0d1117;color:#c9d1d9;'
                 'font-family:-apple-system;padding:18px}'
                 'table{border-collapse:collapse;width:100%}'
+                '.tw{overflow-x:auto;margin-top:8px}'
+                '@media(max-width:640px){td,th{padding:3px 5px;'
+                'font-size:11px;white-space:nowrap}'
+                'body{padding:10px}}'
                 'td,th{padding:4px 8px;border-bottom:1px solid #21262d;'
                 'font-size:13px;text-align:left}'
                 '.card{display:inline-block;background:#161b22;'
@@ -1783,7 +1793,7 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                 cfg['wip'] + '"> Port <input id="cport" size="5" value="' +
                 cfg['port'] + '"> 抓包秒 <input id="cdur" size="3" value="' +
                 cfg['dur'] + '"> <button onclick="saveCfg()">儲存設定</button>'
-                '<table id="tb"></table>'
+                '<div class="tw"><table id="tb"></table></div>'
                 '<h3>最近事件</h3><pre id="ev"></pre>')
         js = ('<script>'
               'const HDR="<tr><th>SSID</th><th>BSSID</th><th>頻道</th>'
