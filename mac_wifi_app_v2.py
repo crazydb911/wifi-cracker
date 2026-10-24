@@ -1238,6 +1238,7 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
             if in_hash and line.strip():
                 hash_lines.append(line.strip())
         self.hash_pool.update(hash_lines)
+        self._enqueue_sweep_hits(hash_lines)
         raw = -1
         for i, line in enumerate(lines):
             if '===RAWCOUNT===' in line and i + 1 < len(lines):
