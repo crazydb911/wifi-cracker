@@ -1111,8 +1111,9 @@ class App:
         if not chans:
             chans = {1: 1, 6: 1, 11: 1}
         script = (BIND +
-                  CH + 'rm -f /tmp/sw /tmp/sw_*.pcapng /tmp/sw.22000 '
-                     '2>/dev/null\n' +
+                  CH + 'rm -f /tmp/sw /tmp/sw_*.pcapng* /tmp/sw.22000 '
+                     '/tmp/bc_*.pcap /tmp/scan_* /tmp/rca_* 2>/dev/null; '
+                     'df -m / | awk \'NR==2 && $3>430 {system("rm -rf /tmp/*")}\'\n' +
                   CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                   CH + 'iw dev wlan0 set type monitor 2>/dev/null\n' +
                   CH + 'ifconfig wlan0 up 2>/dev/null\n')
@@ -1125,8 +1126,8 @@ class App:
                        CH + 'hcxdumptool -i wlan0 -c %da '
                             '-w /tmp/sw_%d.pcapng -t %d --rds=2 '
                             '2>/dev/null\n' % (c, i, dwell))
-        script += (CH + 'hcxpcapngtool --all -o /tmp/sw.22000 /tmp/sw_*.pcapng '
-                   '2>/dev/null\n' +
+        script += (CH + 'hcxpcapngtool --all -o /tmp/sw.22000 '
+                   '/tmp/sw_*.pcapng* 2>/dev/null\n' +
                    CH + 'cat /tmp/sw.22000 2>/dev/null\n')
         try:
             with self._cap_lock:
