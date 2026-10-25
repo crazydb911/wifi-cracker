@@ -1487,6 +1487,45 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
         except Exception as e:
             self._ev('queuefail', '%r' % e)
 
+    def _backfill_upload(self):
+        # 一次性回填: 历史 hashstore 早于入队功能上线, 从未上传破解过
+        try:
+            marker = os.path.join(HASHSTORE, '.backfill_v2')
+            if os.path.exists(marker):
+                return
+            n = 0
+            for fn in os.listdir(HASHSTORE):
+                if not fn.endswith('.22000') or fn.startswith('sweep_all'):
+                    continue
+                safe, _, b = fn[:-6].rpartition('_')
+                if not re.fullmatch(r'[0-9a-f]{12}', b):
+                    continue
+                self._enqueue_upload(safe or 'wifi', b)
+                n += 1
+            sp = os.path.join(HASHSTORE, 'sweep_all.22000')
+            if os.path.exists(sp):
+                byb = {}
+                for l in open(sp):
+                    l = l.strip()
+                    if not l:
+                        continue
+                    f = l.split('*')
+                    if len(f) > 3:
+                        byb.setdefault(f[3].lower(), []).append(l)
+                for b, ls in byb.items():
+                    if not re.fullmatch(r'[0-9a-f]{12}', b):
+                        continue
+                    ent = self.aps_seen.get(b)
+                    ssid = (ent[0] if ent and ent[0] else b)
+                    self._save_local_bssid(ssid, b, ls)
+                    self._enqueue_upload(ssid, b)
+                    n += 1
+            with open(marker, 'w') as f:
+                f.write(str(n))
+            self._ev('queue', 'backfill=%d' % n)
+        except Exception as e:
+            self._ev('queue', 'backfill err=%r' % e)
+
     def _hashstore_lines(self, ssid, bssid):
         safe = re.sub(r'[^A-Za-z0-9._-]', '_', ssid) or 'wifi'
         path = os.path.join(HASHSTORE, '%s_%s.22000' % (safe, bssid.lower()))
@@ -1508,6 +1547,7 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
         return out
 
     def _sync_loop(self):
+        self._backfill_upload()
         while not self._stop.is_set():
             for _ in range(60):
                 if self._stop.is_set():
@@ -1816,7 +1856,8 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
               'win.textContent=s.win.online?("✅ "+s.win.ep):"❌ 離線";'
               'win.style.color=s.win.online?"#7ee787":"#f85149";'
               'q.textContent=s.queue+(s.queue_list.length?"（"+'
-              's.queue_list.map(x=>x.ssid).join(", ")+"）":"");'
+              's.queue_list.slice(0,8).map(x=>x.ssid).join(", ")+'
+              '(s.queue_list.length>8?" …":"")+"）":"");'
               'tgtst.textContent=(s.target?"目標 "+s.target.join(" · "):'
               '"未選定")+" · "+s.phase[1]+(s.sweep?" · 巡掃中":"");'
               'pw.textContent=s.result||"";'
