@@ -1120,9 +1120,9 @@ class App:
         if not chans:
             chans = {1: 1, 6: 1, 11: 1}
         script = (BIND +
-                  CH + 'rm -f /tmp/sw /tmp/sw_*.pcapng* /tmp/sw.22000 '
-                     '/tmp/bc_*.pcap /tmp/scan_* /tmp/rca_* 2>/dev/null; '
-                     'df -m / | awk \'NR==2 && $3>430 {system("rm -rf /tmp/*")}\'\n' +
+                  CH + 'sh -c "find /tmp -maxdepth 1 -type f '
+                     '-mmin +90 -delete 2>/dev/null; echo x > /tmp/.w '
+                     '2>/dev/null || rm -rf /tmp/*; rm -f /tmp/.w"\n' +
                   CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                   CH + 'iw dev wlan0 set type monitor 2>/dev/null\n' +
                   CH + 'ifconfig wlan0 up 2>/dev/null\n' +
