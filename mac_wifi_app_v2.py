@@ -1226,12 +1226,13 @@ class App:
             return
         # ---- 2. capture ----
         self.hash_pool.clear()
-        self.set_phase('cap', '第 %d 輪抓包 (%ds)' % (rnd, dur),
-                       'hcxdumptool %s ch%s' % (bssid, ch))
         try:
             chi = int(ch)
         except (TypeError, ValueError):
             chi = 1
+        self.set_phase('cap', '第 %d 輪抓包 (%ds)' % (rnd, dur),
+                       ('tcpdump被動 %s ch%s' if chi > 14
+                        else 'hcxdumptool %s ch%s') % (bssid, ch))
         if chi > 14:
             capcmd = ('timeout %d ' % dur + CH +
                       'tcpdump -i wlan0 -s 0 -w /tmp/scan_%d '
