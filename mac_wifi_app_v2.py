@@ -1119,6 +1119,22 @@ class App:
         chans = {c: (n + max(0, g + 90) // 2) for c, (n, g) in chans.items()}
         if not chans:
             chans = {1: 1, 6: 1, 11: 1}
+        ch5 = {}
+        for _b, v in self.aps_seen.items():
+            try:
+                c = int(v[1])
+            except (TypeError, ValueError):
+                continue
+            if c <= 14:
+                continue
+            g = v[2] if v[2] is not None else -95
+            e = ch5.setdefault(c, [0, -100])
+            e[0] += 1
+            if g > e[1]:
+                e[1] = g
+        ch5 = dict(sorted(((c, n + max(0, g + 90) // 2)
+                          for c, (n, g) in ch5.items()),
+                         key=lambda kv: -kv[1])[:4])
         script = (BIND +
                   CH + 'sh -c "find /tmp -maxdepth 1 -type f '
                      '-mmin +90 -delete 2>/dev/null; echo x > /tmp/.w '
@@ -1127,6 +1143,8 @@ class App:
                   CH + 'iw dev wlan0 set type monitor 2>/dev/null\n' +
                   CH + 'ifconfig wlan0 up 2>/dev/null\n' +
                   CH + 'iw reg set TW 2>/dev/null\n')
+        if self.target or self._running.is_set():
+            return 0
         total = 0
         for i, (c, w) in enumerate(sorted(chans.items(),
                                           key=lambda kv: -kv[1])):
@@ -1136,6 +1154,14 @@ class App:
                        CH + 'hcxdumptool -i wlan0 -c %da '
                             '-w /tmp/sw_%d.pcapng -t %d --rds=2 '
                             '2>/dev/null\n' % (c, i, dwell))
+        for j, (c, w) in enumerate(ch5.items()):
+            dwell5 = min(30, 12 + 2 * w)
+            total += dwell5 + 5
+            script += (CH + 'iw dev wlan0 set channel %d 2>/dev/null'
+                       '\nsleep 1\n' % c +
+                       'timeout %d ' % (dwell5 + 3) + CH +
+                       'tcpdump -i wlan0 -s 0 -w /tmp/sw5_%d.pcap '
+                       '2>/dev/null\n' % j)
         script += (CH + 'hcxpcapngtool --all -o /tmp/sw.22000 '
                    '/tmp/sw_*.pcapng* 2>/dev/null\n' +
                    CH + 'cat /tmp/sw.22000 2>/dev/null\n')
