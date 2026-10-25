@@ -1035,6 +1035,8 @@ class App:
                 time.sleep(1)
             if not self.vm_ready(timeout=8):
                 continue
+            if self.target or self._running.is_set():
+                continue
             try:
                 self._rca_round()
             except Exception as e:
@@ -1057,33 +1059,35 @@ class App:
         if not chans:
             chans = {1: 1, 6: 1, 11: 1}
         top = [c for c, _w in sorted(chans.items(),
-                                     key=lambda kv: -kv[1])[:8]]
-        script = BIND
-        for c in top:
-            script += ('timeout 24 ' + CH +
-                       'hcxdumptool -i wlan0 -c %da --rcascan=active '
-                       '--rds=4 2>&1\n') % c
-        try:
-            with self._cap_lock:
-                r = subprocess.run(VM_SSH.split() + ['sh', '-s'],
-                                   input=script.encode(), capture_output=True,
-                                   timeout=len(top) * 25 + 60)
-        except Exception as e:
-            self._ev('rca', 'err=%r' % e)
-            return
-        out = (r.stdout or b'').decode('utf-8', 'replace') + \
-              (r.stderr or b'').decode('utf-8', 'replace')
+                                     key=lambda kv: -kv[1])[:5]]
         now = int(time.time())
         got = 0
-        for l in out.splitlines():
-            if '|' not in l:
+        for c in top:
+            if self.target or self._running.is_set():
+                self._ev('rca', 'abort=target')
+                break
+            script = BIND + ('timeout 24 ' + CH +
+                       'hcxdumptool -i wlan0 -c %da --rcascan=active '
+                       '--rds=4 2>&1\n') % c
+            try:
+                with self._cap_lock:
+                    r = subprocess.run(VM_SSH.split() + ['sh', '-s'],
+                                       input=script.encode(),
+                                       capture_output=True, timeout=90)
+            except Exception as e:
+                self._ev('rca', 'err=%r' % e)
                 continue
-            f = l.split('|')
-            if len(f) > 4:
-                x = f[4].strip().lower().replace(':', '')
-                if re.fullmatch(r'[0-9a-f]{12}', x):
-                    self.reach_seen[x] = now
-                    got += 1
+            out = (r.stdout or b'').decode('utf-8', 'replace') + \
+                  (r.stderr or b'').decode('utf-8', 'replace')
+            for l in out.splitlines():
+                if '|' not in l:
+                    continue
+                f = l.split('|')
+                if len(f) > 4:
+                    x = f[4].strip().lower().replace(':', '')
+                    if re.fullmatch(r'[0-9a-f]{12}', x):
+                        self.reach_seen[x] = now
+                        got += 1
         self.reach_seen = {k: v for k, v in self.reach_seen.items()
                           if now - v < 3600}
         try:
@@ -1816,6 +1820,7 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
               'tgtst.textContent=(s.target?"目標 "+s.target.join(" · "):'
               '"未選定")+" · "+s.phase[1]+(s.sweep?" · 巡掃中":"");'
               'pw.textContent=s.result||"";'
+              's.aps.sort(function(a,b){return (b.bidir?1:0)-(a.bidir?1:0)});'
               'tb.innerHTML=HDR+s.aps.map(a=>{const m=a.pw?("🔑 "+a.pw):'
               '(a.hash?"✅ hash":"—");'
               'const c=a.pw?"#7ee787":(a.hash?"#e3b341":"#8b949e");'
