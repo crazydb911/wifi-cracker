@@ -569,6 +569,17 @@ class App:
             self._ev('hotadd', 'err=%r' % e)
             return False
 
+    def _usb_ctrl(self):
+        try:
+            with open(os.path.expanduser('~') +
+                      '/wifi_cracker/usb_ctrl.txt') as f:
+                v = f.read().strip()
+                if v:
+                    return v
+        except Exception:
+            pass
+        return 'qemu-xhci'
+
     def _startup_vm(self):
         if self.vm_ready(timeout=10):
             self._log('✅ 虛擬機已就緒（沿用）')
@@ -599,7 +610,7 @@ class App:
                '-chardev file,id=s0,path=%s,append=on -serial chardev:s0 '
                '-netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-10.0.2.15:22 '
                '-device virtio-net-pci,netdev=n0 '
-               '-device qemu-xhci,id=xhci '
+               '-device ' + self._usb_ctrl() + ',id=xhci '
                '-device usb-host,bus=xhci.0,vendorid=0x148f,productid=0x5572,id=wifiBoot '
                '-display none -monitor unix:%s,server,nowait'
                % (QEMU_BIN, QCOW2, KERNEL, INITRD, SERIAL_LOG, MON_SOCK))
