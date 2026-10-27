@@ -1068,9 +1068,11 @@ class App:
             if self.target or self._running.is_set():
                 self._ev('rca', 'abort=target')
                 break
-            script = BIND + ('timeout 24 ' + CH +
-                       'hcxdumptool -i wlan0 -c %d%s --rcascan=active '
-                       '--rds=4 2>&1\n') % (c, 'b' if c > 14 else 'a')
+            script = BIND +
+                       'ls /sys/class/ieee80211/ | grep -q . || exit 0\n' +
+                       ('timeout 24 ' + CH +
+                        'hcxdumptool -i wlan0 -c %d%s --rcascan=active '
+                        '--rds=4 2>&1\n') % (c, 'b' if c > 14 else 'a')
             try:
                 with self._cap_lock:
                     r = subprocess.run(VM_SSH.split() + ['sh', '-s'],
@@ -1137,6 +1139,7 @@ class App:
                           for c, (n, g) in ch5.items()),
                          key=lambda kv: -kv[1])[:4])
         script = (BIND +
+                  'ls /sys/class/ieee80211/ | grep -q . || { echo NOWLAN; exit 0; }\n' +
                   CH + 'sh -c "find /tmp -maxdepth 1 -type f '
                      '-mmin +90 -delete 2>/dev/null; echo x > /tmp/.w '
                      '2>/dev/null || rm -rf /tmp/*; rm -f /tmp/.w"\n' +
@@ -1180,6 +1183,10 @@ class App:
             out = (r.stdout or b'').decode('utf-8', 'replace')
         except Exception as e:
             self._ev('sweep', 'cycle err=%r' % e)
+            return 0
+        if 'NOWLAN' in out:
+            self._ev('sweep', 'wlan_missing_skip')
+            time.sleep(15)
             return 0
         lines = [l.strip() for l in out.splitlines() if l.startswith('WPA*')]
         pth = os.path.join(HASHSTORE, 'sweep_all.22000')
