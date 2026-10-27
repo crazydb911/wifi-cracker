@@ -1096,7 +1096,9 @@ class App:
                 break
             script = (BIND +
                       'ls /sys/class/ieee80211/ | grep -q . || exit 0\n' +
-                      ('timeout 24 ' + CH +
+                      (CH + 'iw dev wlan0 set txpower fixed ' +
+                       ('1000' if c > 14 else '3000') + ' 2>/dev/null\n' +
+                       'timeout 24 ' + CH +
                        'hcxdumptool -i wlan0 -c %d%s --rcascan=active '
                        '--rds=4 2>&1\n') % (c, 'b' if c > 14 else 'a'))
             try:
@@ -1174,7 +1176,8 @@ class App:
                   CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                   CH + 'iw dev wlan0 set type monitor 2>/dev/null\n' +
                   CH + 'ifconfig wlan0 up 2>/dev/null\n' +
-                  CH + 'iw reg set TW 2>/dev/null\n')
+                  CH + 'iw reg set TW 2>/dev/null\n' +
+                  CH + 'iw dev wlan0 set txpower fixed 3000 2>/dev/null\n')
         if self.target or self._running.is_set():
             return 0
         total = 0
@@ -1190,7 +1193,9 @@ class App:
             dwell5 = min(30, 12 + 2 * w)
             total += dwell5 + 5
             if c in (36, 40, 44, 48):
-                script += ('timeout %d ' % (dwell5 + 4) + CH +
+                script += (CH + 'iw dev wlan0 set txpower fixed 1000'
+                           ' 2>/dev/null\n' +
+                           'timeout %d ' % (dwell5 + 4) + CH +
                            'hcxdumptool -i wlan0 -c %db '
                            '-w /tmp/sw5_%d.pcapng -t %d --rds=2 '
                            '2>/dev/null\n' % (c, j, dwell5))
@@ -1295,6 +1300,8 @@ CH + 'ifconfig wlan0 down 2>/dev/null\n' +
                   CH + 'iw dev wlan0 set type monitor 2>/dev/null\n' +
                   CH + 'ifconfig wlan0 up 2>/dev/null\n' +
                   CH + 'iw reg set TW 2>/dev/null\n' +
+                  CH + 'iw dev wlan0 set txpower fixed ' +
+                  ('1000' if act5 else '3000') + ' 2>/dev/null\n' +
                   (CH + 'tcpdump -y IEEE802_11 -dd "wlan addr1 %s or wlan addr2 %s'
                    ' or wlan addr3 %s or type mgt subtype probereq"'
                    ' > /tmp/t.bpf 2>/dev/null\n'
