@@ -1155,6 +1155,8 @@ class App:
                          key=lambda kv: -kv[1])[:4])
         script = (BIND +
                   'ls /sys/class/ieee80211/ | grep -q . || { echo NOWLAN; exit 0; }\n' +
+                  'find /newroot -maxdepth 1 -name "*.pcapng*" '
+                  '-mmin +30 -delete 2>/dev/null\n' +
                   CH + 'sh -c "find /tmp -maxdepth 1 -type f '
                      '-mmin +90 -delete 2>/dev/null; echo x > /tmp/.w '
                      '2>/dev/null || rm -rf /tmp/*; rm -f /tmp/.w"\n' +
