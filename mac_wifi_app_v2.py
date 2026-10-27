@@ -1068,11 +1068,11 @@ class App:
             if self.target or self._running.is_set():
                 self._ev('rca', 'abort=target')
                 break
-            script = BIND +
-                       'ls /sys/class/ieee80211/ | grep -q . || exit 0\n' +
-                       ('timeout 24 ' + CH +
-                        'hcxdumptool -i wlan0 -c %d%s --rcascan=active '
-                        '--rds=4 2>&1\n') % (c, 'b' if c > 14 else 'a')
+            script = (BIND +
+                      'ls /sys/class/ieee80211/ | grep -q . || exit 0\n' +
+                      ('timeout 24 ' + CH +
+                       'hcxdumptool -i wlan0 -c %d%s --rcascan=active '
+                       '--rds=4 2>&1\n') % (c, 'b' if c > 14 else 'a'))
             try:
                 with self._cap_lock:
                     r = subprocess.run(VM_SSH.split() + ['sh', '-s'],
