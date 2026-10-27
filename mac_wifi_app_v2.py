@@ -595,7 +595,7 @@ class App:
         os.system('rm -f %s %s' % (SERIAL_LOG, MON_SOCK))
         cmd = ('%s -machine virt -cpu cortex-a72 -m 1024 -smp 2 '
                '-drive file=%s,format=qcow2 '
-               '-kernel %s -initrd %s -append "console=ttyAMA0" '
+               '-kernel %s -initrd %s -append "console=ttyAMA0 cfg80211.ieee80211_regdom=TW" '
                '-chardev file,id=s0,path=%s,append=on -serial chardev:s0 '
                '-netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-10.0.2.15:22 '
                '-device virtio-net-pci,netdev=n0 '
@@ -1054,7 +1054,7 @@ class App:
                 c = int(v[1])
             except (TypeError, ValueError):
                 continue
-            if c > 14:
+            if c > 14 and c not in (36, 40, 44, 48):
                 continue
             g = v[2] if v[2] is not None else -95
             chans[c] = chans.get(c, 0) + 1 + max(0, g + 90) // 20
@@ -1069,8 +1069,8 @@ class App:
                 self._ev('rca', 'abort=target')
                 break
             script = BIND + ('timeout 24 ' + CH +
-                       'hcxdumptool -i wlan0 -c %da --rcascan=active '
-                       '--rds=4 2>&1\n') % c
+                       'hcxdumptool -i wlan0 -c %d%s --rcascan=active '
+                       '--rds=4 2>&1\n') % (c, 'b' if c > 14 else 'a')
             try:
                 with self._cap_lock:
                     r = subprocess.run(VM_SSH.split() + ['sh', '-s'],
@@ -1158,13 +1158,19 @@ class App:
         for j, (c, w) in enumerate(ch5.items()):
             dwell5 = min(30, 12 + 2 * w)
             total += dwell5 + 5
-            script += (CH + 'iw dev wlan0 set channel %d 2>/dev/null'
-                       '\nsleep 1\n' % c +
-                       'timeout %d ' % (dwell5 + 3) + CH +
-                       'tcpdump -i wlan0 -s 0 -w /tmp/sw5_%d.pcap '
-                       '2>/dev/null\n' % j)
+            if c in (36, 40, 44, 48):
+                script += ('timeout %d ' % (dwell5 + 4) + CH +
+                           'hcxdumptool -i wlan0 -c %db '
+                           '-w /tmp/sw5_%d.pcapng -t %d --rds=2 '
+                           '2>/dev/null\n' % (c, j, dwell5))
+            else:
+                script += (CH + 'iw dev wlan0 set channel %d 2>/dev/null'
+                           '\nsleep 1\n' % c +
+                           'timeout %d ' % (dwell5 + 3) + CH +
+                           'tcpdump -i wlan0 -s 0 -w /tmp/sw5_%d.pcap '
+                           '2>/dev/null\n' % j)
         script += (CH + 'hcxpcapngtool --all -o /tmp/sw.22000 '
-                   '/tmp/sw_*.pcapng* 2>/dev/null\n' +
+                   '/tmp/sw_*.pcapng* /tmp/sw5_*.pcap* 2>/dev/null\n' +
                    CH + 'cat /tmp/sw.22000 2>/dev/null\n')
         try:
             with self._cap_lock:
@@ -1231,16 +1237,18 @@ class App:
             chi = int(ch)
         except (TypeError, ValueError):
             chi = 1
+        act5 = 36 <= chi <= 48
         self.set_phase('cap', '第 %d 輪抓包 (%ds)' % (rnd, dur),
-                       ('tcpdump被動 %s ch%s' if chi > 14
+                       ('hcxdumptool5G %s ch%s' if act5
+                        else 'tcpdump被動 %s ch%s' if chi > 14
                         else 'hcxdumptool %s ch%s') % (bssid, ch))
-        if chi > 14:
+        if chi > 14 and not act5:
             capcmd = ('timeout %d ' % dur + CH +
                       'tcpdump -i wlan0 -s 0 -w /tmp/scan_%d '
                       '2>/dev/null\n' % rnd)
         else:
             capcmd = ('timeout %d ' % dur + CH + 'hcxdumptool -i wlan0 -c ' +
-                      str(ch) + 'a -w /tmp/scan_%d -t 7 --rds=2 '
+                      str(ch) + ('b' if act5 else 'a') + ' -w /tmp/scan_%d -t 7 --rds=2 '
                       '2>&1 | tail -15\n' % rnd)
         script = (BIND +
 CH + 'sh -c "rm -f /tmp/scan_*" 2>/dev/null\n' +
