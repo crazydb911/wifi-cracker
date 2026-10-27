@@ -1103,6 +1103,7 @@ class App:
             len(top), got, len(self.reach_seen)))
 
     def _sweep_round(self):
+        traffic = self._traffic_bssids()
         chans = {}
         for _b, v in self.aps_seen.items():
             try:
@@ -1113,7 +1114,7 @@ class App:
                 continue
             g = v[2] if v[2] is not None else -95
             e = chans.setdefault(c, [0, -100])
-            e[0] += 1
+            e[0] += 12 if _b in traffic else 1
             if g > e[1]:
                 e[1] = g
         chans = {c: (n + max(0, g + 90) // 2) for c, (n, g) in chans.items()}
