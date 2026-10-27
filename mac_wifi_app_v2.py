@@ -680,10 +680,25 @@ class App:
                 self._log('網卡不在虛擬機 → 嘗試熱掛接...')
                 self._ev('heal', 'trigger=wlan_missing')
                 if not self.hotadd_adapter():
+                    nf = getattr(self, '_hotadd_fails', 0) + 1
+                    self._hotadd_fails = nf
+                    if nf >= 6:
+                        self._hotadd_fails = 0
+                        self._log('熱掛接屢敗 → 重啟虛擬機重抓網卡')
+                        self._ev('heal', 'trigger=hotadd x6')
+                        try:
+                            subprocess.run(['pkill', '-f',
+                                            'qemu-system-aarch64'])
+                        except Exception:
+                            pass
+                        time.sleep(2)
+                        self._startup_vm()
+                        continue
                     self._ui(lambda: self._set_text(
                         self.lbl_scan, '⚠️ 請拔插 USB 網卡', C_AMBER))
                     time.sleep(10)
                     continue
+                self._hotadd_fails = 0
             self._scan_now()
             if not self.aps:
                 zero = getattr(self, '_zero_scans', 0) + 1
