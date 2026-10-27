@@ -38,13 +38,17 @@ echo ===RC36B===
 timeout 18 $CH hcxdumptool -i wlan0 -c 36b --rcascan=active 2>&1 | grep -aE "PROBERESPONSE|BEACON" | head -3
 echo ===RC44B===
 timeout 18 $CH hcxdumptool -i wlan0 -c 44b --rcascan=active 2>&1 | grep -aE "PROBERESPONSE|BEACON" | head -3
+echo ===RC36B-RESP===
+timeout 25 $CH hcxdumptool -i wlan0 -c 36b --rcascan=active 2>&1 | grep -aE "PROBERESPONSE|received" | tail -4
 echo ===ATK36B===
-timeout 32 $CH hcxdumptool -i wlan0 -c 36b --bpf=/tmp/t.bpf -w /tmp/a36.pcapng -t 5 --rds=2 >/dev/null 2>&1
+timeout 32 $CH hcxdumptool -i wlan0 -c 36b -w /tmp/a36.pcapng -t 5 --rds=2 2>&1 | tail -6
+ls -la /tmp/a36* 2>/dev/null
 $CH hcxpcapngtool --all -o /tmp/a36.22000 /tmp/a36.pcapng* 2>/dev/null
 echo 36B: PMKID=$($CH grep -c PMKID /tmp/a36.22000 2>/dev/null) HS=$($CH grep -c EAPOL /tmp/a36.22000 2>/dev/null)
 $CH rm -f /tmp/a36*
 echo ===ATK1_BPF===
-timeout 32 $CH hcxdumptool -i wlan0 -c 1a --bpf=/tmp/t.bpf -w /tmp/a1.pcapng -t 7 --rds=2 >/dev/null 2>&1
+timeout 32 $CH hcxdumptool -i wlan0 -c 1a --bpf=/tmp/t.bpf -w /tmp/a1.pcapng -t 7 --rds=2 2>&1 | tail -6
+ls -la /tmp/a1* 2>/dev/null
 $CH hcxpcapngtool --all -o /tmp/a1.22000 /tmp/a1.pcapng* 2>/dev/null
 echo 1BPF: PMKID=$($CH grep -c PMKID /tmp/a1.22000 2>/dev/null) HS=$($CH grep -c EAPOL /tmp/a1.22000 2>/dev/null)
 $CH rm -f /tmp/a1* /tmp/t.bpf
