@@ -603,6 +603,16 @@ class App:
         except Exception:
             pass
         time.sleep(2)
+        try:
+            nc = subprocess.run(
+                "ioreg -r -c IOUSBHostDevice -w 0 | grep -c "
+                "'idVendor" + chr(34) + " = 5263'",
+                shell=True, capture_output=True, text=True).stdout.strip()
+        except Exception:
+            nc = '1'
+        if nc == '0':
+            self._ev('heal', 'no_card_on_bus_skip_qemu')
+            return
         os.system('rm -f %s %s' % (SERIAL_LOG, MON_SOCK))
         cmd = ('%s -machine virt -cpu cortex-a72 -m 1024 -smp 2 '
                '-drive file=%s,format=qcow2 '
