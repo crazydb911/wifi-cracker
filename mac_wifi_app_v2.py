@@ -1258,6 +1258,7 @@ class App:
             capcmd = ('timeout %d ' % dur + CH + 'hcxdumptool -i wlan0 -c ' +
                       str(ch) + ('b' if act5 else 'a') +
                       (' --bpf=/tmp/t.bpf' if bssid_c else '') +
+                      (' --m2max=16' if rnd >= 3 else '') +
                       ' -w /tmp/scan_%d -t 7 --rds=2 '
                       '2>&1 | tail -15\n' % rnd)
         script = (BIND +
