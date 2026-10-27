@@ -3,7 +3,8 @@ import paramiko, sys
 
 C = paramiko.SSHClient()
 C.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-C.connect("100.64.239.76", username="tongbao",
+C.connect(sys.argv[1] if len(sys.argv) > 1 else "192.168.1.123",
+          username="tongbao",
           key_filename=r"C:\Users\crazydb911\.ssh\opremote_ed25519",
           timeout=25, banner_timeout=90, auth_timeout=90)
 
