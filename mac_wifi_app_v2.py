@@ -111,6 +111,7 @@ class App:
         else:
             threading.Thread(target=self._usb_vm_loop, daemon=True).start()
             threading.Thread(target=self._scan_loop, daemon=True).start()
+            threading.Thread(target=self._watchdog_loop, daemon=True).start()
             threading.Thread(target=self._sync_loop, daemon=True).start()
             threading.Thread(target=self._web_loop, daemon=True).start()
             threading.Thread(target=self._rca_loop, daemon=True).start()
@@ -620,12 +621,17 @@ class App:
                '-chardev file,id=s0,path=%s,append=on -serial chardev:s0 '
                '-netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-10.0.2.15:22 '
                '-device virtio-net-pci,netdev=n0 '
-               '-device ' + self._usb_ctrl() + ',id=xhci '
+               '-device %s,id=xhci '
                '-device usb-host,bus=xhci.0,vendorid=0x148f,productid=0x5572,id=wifiBoot '
                '-display none -monitor unix:%s,server,nowait'
-               % (QEMU_BIN, QCOW2, KERNEL, INITRD, SERIAL_LOG, MON_SOCK))
+               % (QEMU_BIN, QCOW2, KERNEL, INITRD, SERIAL_LOG,
+                  self._usb_ctrl(), MON_SOCK))
+        try:
+            _qf = open("/tmp/qemu_stderr.log", "a")
+        except Exception:
+            _qf = subprocess.DEVNULL
         subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL)
+                                 stderr=_qf)
         for _ in range(50):
             if self._stop.is_set():
                 return
@@ -672,7 +678,38 @@ class App:
         return self.vm_ready(timeout=12)
 
     # ================= scan =================
+    def _watchdog_loop(self):
+        while not self._stop.is_set():
+            try:
+                time.sleep(60)
+                if self.target or self._running.is_set():
+                    continue
+                if self._qemu_age() >= 0 or self.vm_ready(timeout=8):
+                    continue
+                q = subprocess.run(
+                    ['sh', '-c', "ioreg -r -c IOUSBHostDevice -w 0 | grep -c "
+                     + "'idVendor" + chr(34) + " = 5263'"],
+                    capture_output=True, timeout=25).stdout.decode().strip()
+                if not q.isdigit() or q == '0':
+                    continue
+                self._ev('watchdog', 'card_on_bus_no_vm_boot')
+                self._startup_vm()
+            except Exception as e:
+                try:
+                    self._ev('watchdog', 'err=%r' % e)
+                except Exception:
+                    pass
+                time.sleep(20)
+
     def _scan_loop(self):
+        while not self._stop.is_set():
+            try:
+                self._scan_loop_body()
+            except Exception as e:
+                self._ev('heal', 'scanloop_died err=%r' % e)
+                time.sleep(5)
+
+    def _scan_loop_body(self):
         miss = 0
         while not self._stop.is_set():
             if (not self.target and not self._running.is_set()
@@ -1224,6 +1261,10 @@ class App:
                                    input=script.encode(), capture_output=True,
                                    timeout=total + 90)
             out = (r.stdout or b'').decode('utf-8', 'replace')
+            if (r.returncode != 0 and 'WPA*' not in out
+                    and 'NOWLAN' not in out):
+                self._ev('sweep', 'vm_down rc=%d' % r.returncode)
+                return -1
         except Exception as e:
             self._ev('sweep', 'cycle err=%r' % e)
             return 0
@@ -1253,7 +1294,10 @@ class App:
         try:
             while not self._stop.is_set() and not self.target:
                 try:
-                    self._sweep_round()
+                    if self._sweep_round() < 0:
+                        self._ev('sweep', 'pause_for_heal')
+                        time.sleep(10)
+                        break
                     full, reach, hits = self._coverage()
                     fh, rh = full & hits, reach & hits
                     fp = 100.0 * len(fh) / len(full) if full else 0
