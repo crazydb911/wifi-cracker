@@ -678,6 +678,24 @@ class App:
         return self.vm_ready(timeout=12)
 
     # ================= scan =================
+    def _card_health(self):
+        try:
+            a = subprocess.run(
+                ['sh', '-c', "ioreg -r -c IOUSBHostDevice -w 0 | grep -c "
+                 + "'idVendor" + chr(34) + " = 5263'"],
+                capture_output=True, timeout=25).stdout.decode().strip()
+            b = subprocess.run(
+                ['sh', '-c', "system_profiler SPUSBDataType 2>/dev/null "
+                 "| grep -ci '802.11 n'"],
+                capture_output=True, timeout=90).stdout.decode().strip()
+        except Exception:
+            return 'unknown'
+        if a == '0':
+            return 'absent'
+        if b == '0':
+            return 'zombie'
+        return 'ok'
+
     def _watchdog_loop(self):
         while not self._stop.is_set():
             try:
@@ -742,6 +760,15 @@ class App:
                     self._hotadd_fails = nf
                     if nf >= 6:
                         self._hotadd_fails = 0
+                        h = self._card_health()
+                        if h == 'zombie':
+                            self._log('網卡列舉卡死（USB半死）→ 換個USB孔重插')
+                            self._ev('heal', 'zombie_card_backoff60')
+                            self._ui(lambda: self._set_text(
+                                self.lbl_scan,
+                                '⚠️ 網卡列舉卡死 → 請換USB孔重插', C_AMBER))
+                            time.sleep(60)
+                            continue
                         self._log('熱掛接屢敗 → 重啟虛擬機重抓網卡')
                         self._ev('heal', 'trigger=hotadd x6')
                         try:
