@@ -854,7 +854,8 @@ class App:
                         old[2] = gv
                     if ssid and ssid != '(hidden)':
                         old[0] = ssid
-            for k in [k for k, v in self.aps_seen.items() if _now - v[3] > 3600]:
+            for k in [k for k, v in self.aps_seen.items()
+                      if _now - v[3] > 604800]:
                 self.aps_seen.pop(k, None)
             try:
                 with open(APS_SEEN, 'w') as f:
@@ -1206,6 +1207,18 @@ class App:
         self._ev('rca', 'ch=%d resp=%d pool=%d' % (
             len(top), got, len(self.reach_seen)))
 
+    def _ch_w(self, n, g, ts):
+        # 地圖保留7天, 但越久沒見到的AP權重越低, 舊地圖不綁架新現場
+        w = n + max(0, g + 90) // 2
+        age = time.time() - (ts or 0)
+        if age > 604800:
+            w //= 4
+        elif age > 86400:
+            w //= 2
+        elif age > 21600:
+            w = (w * 3) // 4
+        return max(1, w)
+
     def _sweep_round(self):
         traffic = self._traffic_bssids()
         chans = {}
@@ -1217,11 +1230,14 @@ class App:
             if c > 14:
                 continue
             g = v[2] if v[2] is not None else -95
-            e = chans.setdefault(c, [0, -100])
+            e = chans.setdefault(c, [0, -100, 0])
             e[0] += 12 if _b in traffic else 1
             if g > e[1]:
                 e[1] = g
-        chans = {c: (n + max(0, g + 90) // 2) for c, (n, g) in chans.items()}
+            if len(v) > 3 and v[3] > e[2]:
+                e[2] = v[3]
+        chans = {c: self._ch_w(n, g, t)
+                 for c, (n, g, t) in chans.items()}
         if not chans:
             chans = {1: 1, 6: 1, 11: 1}
         ch5 = {}
@@ -1233,12 +1249,14 @@ class App:
             if c <= 14:
                 continue
             g = v[2] if v[2] is not None else -95
-            e = ch5.setdefault(c, [0, -100])
+            e = ch5.setdefault(c, [0, -100, 0])
             e[0] += 1
             if g > e[1]:
                 e[1] = g
-        ch5 = dict(sorted(((c, n + max(0, g + 90) // 2)
-                          for c, (n, g) in ch5.items()),
+            if len(v) > 3 and v[3] > e[2]:
+                e[2] = v[3]
+        ch5 = dict(sorted(((c, self._ch_w(n, g, t))
+                          for c, (n, g, t) in ch5.items()),
                          key=lambda kv: -kv[1])[:4])
         script = (BIND +
                   'ls /sys/class/ieee80211/ | grep -q . || { echo NOWLAN; exit 0; }\n' +
