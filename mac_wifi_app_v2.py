@@ -39,6 +39,7 @@ LOCAL_DIR = os.path.expanduser('~/MacCapture/captures')
 CAPSTORE  = os.path.expanduser('~/wifi_cracker/capstore')
 HASHSTORE = os.path.expanduser('~/wifi_cracker/hashstore')
 APS_SEEN  = os.path.expanduser('~/wifi_cracker/aps_seen.json')
+CARD_IDS  = os.path.expanduser('~/wifi_cracker/card_ids.txt')
 REACH_SEEN = os.path.expanduser('~/wifi_cracker/reach_seen.json')
 TS_IP     = '100.94.10.122'  # Windows cracker on Tailscale (外出備援)
 WEB_PORT  = 8765             # Mac 遠端儀表板 (手機/任何裝置可看)
@@ -515,12 +516,30 @@ class App:
             pass
         return ''
 
+    def _card_ids(self):
+        # 換網卡只改 ~/wifi_cracker/card_ids.txt 寫成 vid:pid(hex), 不必動程式
+        vid, pid = '148f', '5572'
+        try:
+            with open(CARD_IDS) as f:
+                t = f.read().strip().lower().replace('-', ':')
+            v, q = t.split(':')[:2]
+            if v.strip() and q.strip():
+                vid, pid = v.strip(), q.strip()
+        except Exception:
+            pass
+        try:
+            return vid, pid, str(int(vid, 16)), str(int(pid, 16))
+        except ValueError:
+            return '148f', '5572', '5263', '21874'
+
     def _check_usb(self):
         try:
             r = subprocess.run(['ioreg', '-r', '-c', 'IOUSBHostDevice'],
                                capture_output=True, timeout=30)
             out = (r.stdout or b'').decode('utf-8', 'replace')
-            if ('idVendor" = 5263' in out) and ('idProduct" = 21874' in out):
+            v, q, vd, qd = self._card_ids()
+            if (('idVendor" = ' + vd) in out and
+                    ('idProduct" = ' + qd) in out):
                 return True
         except Exception:
             pass
@@ -528,7 +547,8 @@ class App:
             r = subprocess.run(['system_profiler', 'SPUSBDataType'],
                                capture_output=True, timeout=30)
             out = (r.stdout or b'').decode('utf-8', 'replace').lower()
-            return ('148f' in out) and ('5572' in out)
+            v, q = self._card_ids()[:2]
+            return (v in out) and (q in out)
         except Exception:
             return False
 
@@ -559,7 +579,8 @@ class App:
                  'printf "device_del wifiBoot\\ndevice_del wifiA\\n" | '
                  'nc -U -w 3 ' + MON_SOCK +
                  '; sleep 1; printf "device_add usb-host,bus=xhci.0,'
-                 'vendorid=0x148f,productid=0x5572,id=wifiA\\n" | '
+                 'vendorid=0x' + self._card_ids()[0] + ',productid=0x'
+                     + self._card_ids()[1] + ',id=wifiA\n" | '
                  'nc -U -w 3 ' + MON_SOCK],
                 capture_output=True, timeout=20)
             time.sleep(4)
@@ -607,13 +628,14 @@ class App:
         try:
             nc = subprocess.run(
                 "ioreg -r -c IOUSBHostDevice -w 0 | grep -c "
-                "'idVendor" + chr(34) + " = 5263'",
+                "'idVendor" + chr(34) + " = " + self._card_ids()[2] + "'",
                 shell=True, capture_output=True, text=True).stdout.strip()
         except Exception:
             nc = '1'
         if nc == '0':
             self._ev('heal', 'no_card_on_bus_skip_qemu')
             return
+        cv, cp = self._card_ids()[:2]
         os.system('rm -f %s %s' % (SERIAL_LOG, MON_SOCK))
         cmd = ('%s -machine virt -cpu cortex-a72 -m 1024 -smp 2 '
                '-drive file=%s,format=qcow2 '
@@ -622,10 +644,10 @@ class App:
                '-netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-10.0.2.15:22 '
                '-device virtio-net-pci,netdev=n0 '
                '-device %s,id=xhci '
-               '-device usb-host,bus=xhci.0,vendorid=0x148f,productid=0x5572,id=wifiBoot '
+               '-device usb-host,bus=xhci.0,vendorid=0x%s,productid=0x%s,id=wifiBoot '
                '-display none -monitor unix:%s,server,nowait'
                % (QEMU_BIN, QCOW2, KERNEL, INITRD, SERIAL_LOG,
-                  self._usb_ctrl(), MON_SOCK))
+                  self._usb_ctrl(), cv, cp, MON_SOCK))
         try:
             _qf = open("/tmp/qemu_stderr.log", "a")
         except Exception:
@@ -682,7 +704,7 @@ class App:
         try:
             a = subprocess.run(
                 ['sh', '-c', "ioreg -r -c IOUSBHostDevice -w 0 | grep -c "
-                 + "'idVendor" + chr(34) + " = 5263'"],
+                 + "'idVendor" + chr(34) + " = " + self._card_ids()[2] + "'"],
                 capture_output=True, timeout=25).stdout.decode().strip()
             b = subprocess.run(
                 ['sh', '-c', "system_profiler SPUSBDataType 2>/dev/null "
@@ -706,7 +728,7 @@ class App:
                     continue
                 q = subprocess.run(
                     ['sh', '-c', "ioreg -r -c IOUSBHostDevice -w 0 | grep -c "
-                     + "'idVendor" + chr(34) + " = 5263'"],
+                     + "'idVendor" + chr(34) + " = " + self._card_ids()[2] + "'"],
                     capture_output=True, timeout=25).stdout.decode().strip()
                 if not q.isdigit() or q == '0':
                     continue
