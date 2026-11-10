@@ -35,6 +35,14 @@ BIND = ('mount --bind /proc /newroot/proc 2>/dev/null; '
         'mount --bind /sys /newroot/sys 2>/dev/null; '
         'mount --bind /dev /newroot/dev 2>/dev/null\n') if RUNNER_MODE else ''
 
+# rt2800usb under QEMU usb-host wedges after ifconfig down/up (field-proven:
+# one manual down/set-type/up => permanent 0 packets + TX ERROR + txpower -95).
+# Default: never touch the interface. Create ~/wifi_cracker/ifreset.on to restore old behavior.
+IF_RESET = os.path.exists(os.path.expanduser('~/wifi_cracker/ifreset.on'))
+IFR = ((CH + 'ifconfig wlan0 down 2>/dev/null\n' +
+        CH + 'iw dev wlan0 set type monitor 2>/dev/null\n' +
+        CH + 'ifconfig wlan0 up 2>/dev/null\n') if IF_RESET else '')
+
 LOCAL_DIR = os.path.expanduser('~/MacCapture/captures')
 CAPSTORE  = os.path.expanduser('~/wifi_cracker/capstore')
 HASHSTORE = os.path.expanduser('~/wifi_cracker/hashstore')
@@ -832,9 +840,7 @@ class App:
             self._ui(lambda: self._set_text(self.lbl_scan, '⏳ 虛擬機未就緒', C_AMBER))
             return
         script = (BIND +
-                  CH + 'ifconfig wlan0 down 2>/dev/null\n' +
-                  CH + 'iw dev wlan0 set type monitor 2>/dev/null\n' +
-                  CH + 'ifconfig wlan0 up 2>/dev/null\n' +
+                  IFR +
                   CH + 'iw reg set TW 2>/dev/null\nsleep 1\n' +
                   'for ch in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 '
                   '36 40 44 48 149 153 157 161; do\n' +
@@ -1287,9 +1293,7 @@ class App:
                   CH + 'sh -c "find /tmp -maxdepth 1 -type f '
                      '-mmin +90 -delete 2>/dev/null; echo x > /tmp/.w '
                      '2>/dev/null || rm -rf /tmp/*; rm -f /tmp/.w"\n' +
-                  CH + 'ifconfig wlan0 down 2>/dev/null\n' +
-                  CH + 'iw dev wlan0 set type monitor 2>/dev/null\n' +
-                  CH + 'ifconfig wlan0 up 2>/dev/null\n' +
+                  IFR +
                   CH + 'iw reg set TW 2>/dev/null\n' +
                   CH + 'iw dev wlan0 set txpower fixed 3000 2>/dev/null\n')
         if self.target or self._running.is_set():
@@ -1417,9 +1421,7 @@ class App:
                       '2>&1 | tail -15\n' % rnd)
         script = (BIND +
 CH + 'sh -c "rm -f /tmp/scan_*" 2>/dev/null\n' +
-CH + 'ifconfig wlan0 down 2>/dev/null\n' +
-                  CH + 'iw dev wlan0 set type monitor 2>/dev/null\n' +
-                  CH + 'ifconfig wlan0 up 2>/dev/null\n' +
+IFR +
                   CH + 'iw reg set TW 2>/dev/null\n' +
                   CH + 'iw dev wlan0 set txpower fixed ' +
                   ('1000' if act5 else '3000') + ' 2>/dev/null\n' +
