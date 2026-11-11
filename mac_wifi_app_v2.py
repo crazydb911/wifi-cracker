@@ -453,7 +453,8 @@ class App:
                 self.log.config(state='disabled')
             except Exception as _e:
                 try:
-                    open('/tmp/mac_wifi_ui_err.txt', 'a').write(repr(_e) + NL)
+                    open('/tmp/mac_wifi_ui_err.txt', 'a').write(
+                        repr(_e) + chr(10))
                 except Exception:
                     pass
             self._ui_selfcheck()
@@ -848,7 +849,7 @@ class App:
                   '  echo "MARK:$ch"\n' +
                   CH + '  timeout 2.5 /usr/bin/tcpdump -i wlan0 -e -n '
                   '2>/dev/null\n' +
-                  'done\ndone\n')
+                  'done\n')
         try:
             with self._cap_lock:
                 r = subprocess.run(VM_SSH.split() + ['sh', '-s'], input=script.encode(),
@@ -1193,14 +1194,21 @@ class App:
                                      key=lambda kv: -kv[1])[:5]]
         now = int(time.time())
         got = 0
+        last_pow = None
         for c in top:
             if self.target or self._running.is_set():
                 self._ev('rca', 'abort=target')
                 break
+            pow_ = '1000' if c > 14 else '3000'
+            # only retune when the band actually flips: top mixes 2.4G and
+            # 5G, so the old code wrote the register on every channel.
+            pw = '' if pow_ == last_pow else (
+                CH + 'iw dev wlan0 set txpower fixed ' + pow_ +
+                ' 2>/dev/null\n')
+            last_pow = pow_
             script = (BIND +
                       'ls /sys/class/ieee80211/ | grep -q . || exit 0\n' +
-                      (CH + 'iw dev wlan0 set txpower fixed ' +
-                       ('1000' if c > 14 else '3000') + ' 2>/dev/null\n' +
+                      (pw +
                        'timeout 24 ' + CH +
                        'hcxdumptool -i wlan0 -c %d%s --rcascan=active '
                        '--rds=4 2>&1\n') % (c, 'b' if c > 14 else 'a'))
@@ -1421,7 +1429,9 @@ class App:
         except (TypeError, ValueError):
             chi = 1
         act5 = 36 <= chi <= 48
-        bssid_c = ':'.join(bssid[i:i + 2]) if bssid else ''
+        bs = (bssid or '').replace(':', '').lower()
+        bssid_c = (':'.join(bs[j:j + 2] for j in range(0, len(bs) - 1, 2))
+                   if len(bs) >= 12 else '')
         self.set_phase('cap', '第 %d 輪抓包 (%ds)' % (rnd, dur),
                        ('hcxdumptool5G %s ch%s' if act5
                         else 'tcpdump被動 %s ch%s' if chi > 14
@@ -1611,7 +1621,7 @@ IFR +
                 out.append(h)
             elif h.startswith('WPA*01'):
                 f = h.split('*')
-                if len(f) >= 4 and f[2] == b:
+                if len(f) >= 4 and f[3].lower() == b:
                     out.append(h)
         return out
 
@@ -1780,7 +1790,7 @@ IFR +
                     out.append(l)
                 elif l.startswith('WPA*01'):
                     f = l.split('*')
-                    if len(f) >= 4 and f[2] == b:
+                    if len(f) >= 4 and f[3].lower() == b:
                         out.append(l)
         except Exception:
             pass
