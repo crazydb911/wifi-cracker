@@ -78,6 +78,8 @@ chk('2.4G covers universal 1/6/11',
       all(('-c %da ' % c) in s1 for c in (1, 6, 11)))
 chk('stale 149/153 suppressed', '149b' not in s1 and '153b' not in s1)
 chk('preheat budget under 60s', t1 < 60, '(got %ds)' % t1)
+chk('5G txpower failure is observable (TXPOWFAIL)', 'TXPOWFAIL' in s1)
+chk('txpower write no longer swallowed', 'set txpower fixed 1000 2>&1' in s1)
 
 print('=== steady round (map-driven) ===')
 s2, t2 = ns['gen'](T(dict(oldmap), True))

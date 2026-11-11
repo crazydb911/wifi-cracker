@@ -1317,8 +1317,8 @@ class App:
         if any(c in (36, 40, 44, 48) for c in ch5):
             # one PHY re-tune per round instead of one per channel: the
             # 3000<->1000 ping-pong is register churn we do not need.
-            script += (CH + 'iw dev wlan0 set txpower fixed 1000'
-                       ' 2>/dev/null\n')
+            script += (CH + 'iw dev wlan0 set txpower fixed 1000 2>&1'
+                       ' | grep -q . && echo TXPOWFAIL\n')
         for j, (c, w) in enumerate(ch5.items()):
             dwell5 = 5 if pre else min(30, 12 + 2 * w)
             total += dwell5 + (3 if pre else 5)
@@ -1350,6 +1350,11 @@ class App:
         except Exception as e:
             self._ev('sweep', 'cycle err=%r' % e)
             return 0
+        if 'TXPOWFAIL' in out:
+            # driver refused the 5G power back-off: the PHY stays at its
+            # 23 dBm ceiling, which is the USB brownout suspect.
+            self._ev('txpower', '5G back-off rejected; PHY at max')
+
         if 'NOWLAN' in out:
             self._ev('sweep', 'wlan_missing_skip')
             self._preheat = False
