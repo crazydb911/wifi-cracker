@@ -1286,6 +1286,12 @@ class App:
         ch5 = dict(sorted(((c, self._ch_w(n, g, t))
                           for c, (n, g, t) in ch5.items()),
                          key=lambda kv: -kv[1])[:4])
+        if not getattr(self, '_preheat', False):
+            # fresh phy / new place: the map is yesterday's town. Blind-sweep the
+            # universal set first so the card attacks within seconds of waking up.
+            chans = {1: 1, 6: 1, 11: 1}
+            ch5 = {36: 1, 40: 1, 44: 1, 48: 1}
+            self._ev('preheat', 'blind 1/6/11 + 36/40/44/48')
         script = (BIND +
                   'ls /sys/class/ieee80211/ | grep -q . || { echo NOWLAN; exit 0; }\n' +
                   'find /newroot -maxdepth 1 -name "*.pcapng*" '
@@ -1335,12 +1341,14 @@ class App:
             if (r.returncode != 0 and 'WPA*' not in out
                     and 'NOWLAN' not in out):
                 self._ev('sweep', 'vm_down rc=%d' % r.returncode)
+                self._preheat = False
                 return -1
         except Exception as e:
             self._ev('sweep', 'cycle err=%r' % e)
             return 0
         if 'NOWLAN' in out:
             self._ev('sweep', 'wlan_missing_skip')
+            self._preheat = False
             time.sleep(15)
             return 0
         lines = [l.strip() for l in out.splitlines() if l.startswith('WPA*')]
@@ -1359,6 +1367,7 @@ class App:
             self.hash_pool.update(new)
             self._enqueue_sweep_hits(new)
         self._ev('sweep', 'cycle ch=%d new=%d' % (len(chans), len(new)))
+        self._preheat = True
         return len(new)
 
     def _sweep_loop(self):
