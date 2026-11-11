@@ -1286,7 +1286,8 @@ class App:
         ch5 = dict(sorted(((c, self._ch_w(n, g, t))
                           for c, (n, g, t) in ch5.items()),
                          key=lambda kv: -kv[1])[:4])
-        if not getattr(self, '_preheat', False):
+        pre = not getattr(self, '_preheat', False)
+        if pre:
             # fresh phy / new place: the map is yesterday's town. Blind-sweep the
             # universal set first so the card attacks within seconds of waking up.
             chans = {1: 1, 6: 1, 11: 1}
@@ -1307,19 +1308,22 @@ class App:
         total = 0
         for i, (c, w) in enumerate(sorted(chans.items(),
                                           key=lambda kv: -kv[1])):
-            dwell = min(45, 8 + 3 * w)
-            total += dwell + 6
+            dwell = 5 if pre else min(45, 8 + 3 * w)
+            total += dwell + (3 if pre else 6)
             script += ('timeout %d ' % (dwell + 4) +
                        CH + 'hcxdumptool -i wlan0 -c %da '
                             '-w /tmp/sw_%d.pcapng -t %d --rds=2 '
                             '2>/dev/null\n' % (c, i, dwell))
+        if any(c in (36, 40, 44, 48) for c in ch5):
+            # one PHY re-tune per round instead of one per channel: the
+            # 3000<->1000 ping-pong is register churn we do not need.
+            script += (CH + 'iw dev wlan0 set txpower fixed 1000'
+                       ' 2>/dev/null\n')
         for j, (c, w) in enumerate(ch5.items()):
-            dwell5 = min(30, 12 + 2 * w)
-            total += dwell5 + 5
+            dwell5 = 5 if pre else min(30, 12 + 2 * w)
+            total += dwell5 + (3 if pre else 5)
             if c in (36, 40, 44, 48):
-                script += (CH + 'iw dev wlan0 set txpower fixed 1000'
-                           ' 2>/dev/null\n' +
-                           'timeout %d ' % (dwell5 + 4) + CH +
+                script += ('timeout %d ' % (dwell5 + 4) + CH +
                            'hcxdumptool -i wlan0 -c %db '
                            '-w /tmp/sw5_%d.pcapng -t %d --rds=2 '
                            '2>/dev/null\n' % (c, j, dwell5))
