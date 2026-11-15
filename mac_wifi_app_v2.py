@@ -618,6 +618,9 @@ class App:
         if not self._boot_lock.acquire(blocking=False):
             return
         try:
+            # A fresh QEMU means a freshly bound radio; let the first
+            # round re-arm txpower instead of trusting a stale flag.
+            self._last_pow = None
             self._startup_vm_inner()
         finally:
             self._boot_lock.release()
@@ -634,17 +637,38 @@ class App:
         except Exception:
             pass
         time.sleep(2)
+        cv, cp = self._card_ids()[:2]
+        dec = self._card_ids()[2]
+        # Match both spellings. macOS has been seen to render idVendor as a
+        # decimal integer; if it ever emits the hex form instead, a
+        # decimal-only test returns 0 forever and the app deadlocks itself out
+        # of the only capture card it has, silently, in the field.
+        pat = ('idVendor' + chr(34) + ' = (' + dec + '|0x' +
+               str(cv).replace('0x', '') + ')')
+        # Single-quote the pattern: it contains a double quote, so wrapping it
+        # in one would split the shell word and make grep die with a syntax
+        # error, leaving nc empty and the gate silently always-open. -E is
+        # required or the (a|b) alternation never matches.
+        cmd = "ioreg -p IOUSB -l -w 0 | grep -cE '" + pat + "'"
         try:
-            nc = subprocess.run(
-                "ioreg -r -c IOUSBHostDevice -w 0 | grep -c "
-                "'idVendor" + chr(34) + " = " + self._card_ids()[2] + "'",
-                shell=True, capture_output=True, text=True).stdout.strip()
+            nc = subprocess.run(cmd, shell=True, capture_output=True,
+                                text=True).stdout.strip()
         except Exception:
             nc = '1'
         if nc == '0':
-            self._ev('heal', 'no_card_on_bus_skip_qemu')
+            miss = getattr(self, '_bus_miss', 0) + 1
+            self._bus_miss = miss
+            self._ev('heal', 'no_card_on_bus_skip_qemu x%d' % miss)
+            # The card falling off the bus is the one failure no software here
+            # can undo: there is no VBUS reset on this Mac. Saying so on the
+            # result pane is the difference between a user replugging in ten
+            # seconds and a user watching a spinner for an hour.
+            self._result('⚠️ USB 網卡不在總線上（已等 %d 次）— 請拔插網卡'
+                         % miss, C_AMBER)
+            self.set_phase('idle', '等實體拔插網卡',
+                           '軟體無法重啟 USB 供電', C_AMBER)
             return
-        cv, cp = self._card_ids()[:2]
+        self._bus_miss = 0
         os.system('rm -f %s %s' % (SERIAL_LOG, MON_SOCK))
         cmd = ('%s -machine virt -cpu cortex-a72 -m 1024 -smp 2 '
                '-drive file=%s,format=qcow2 '
@@ -1309,8 +1333,14 @@ class App:
                      '-mmin +90 -delete 2>/dev/null; echo x > /tmp/.w '
                      '2>/dev/null || rm -rf /tmp/*; rm -f /tmp/.w"\n' +
                   IFR +
-                  CH + 'iw reg set TW 2>/dev/null\n' +
-                  CH + 'iw dev wlan0 set txpower fixed 3000 2>/dev/null\n')
+                  CH + 'iw reg set TW 2>/dev/null\n')
+        # One txpower write per band change, not one per round. Field
+        # evidence: the PHY sits locked at 23 dBm and answers the 5G
+        # back-off with TXPOWFAIL, so the 3000<->1000 ping-pong bought
+        # nothing and only added register churn to a dying card.
+        if getattr(self, '_last_pow', None) != '3000':
+            script += CH + 'iw dev wlan0 set txpower fixed 3000 2>/dev/null\n'
+            self._last_pow = '3000'
         if self.target or self._running.is_set():
             return 0
         total = 0
@@ -1319,26 +1349,40 @@ class App:
                                           key=lambda kv: -kv[1])):
             dwell = 4 if pre else min(45, 8 + 3 * w)
             total += dwell + (2 if pre else 6)
-            script += ('timeout %d ' % (dwell + 4) +
-                       CH + 'hcxdumptool -i wlan0 -c %da '
-                            '-w /tmp/sw_%d.pcapng -t %d --rds=2 '
-                            '2>/dev/null\n' % (c, i, dwell))
+            if pre:
+                # Passive during preheat, on both bands. Every hcxdumptool
+                # start performs its own interface mode init - the same
+                # down/set-monitor/up register churn the field logs tie to
+                # the ~40s wedge. Per-channel flush put 7 of those starts
+                # inside the first 45s, the likeliest reason card life fell
+                # from seven minutes to 45. Preheat only needs to learn
+                # which channels carry APs; tcpdump does that mode-free.
+                script += (CH + 'iw dev wlan0 set channel %d 2>/dev/null'
+                           '\nsleep 1\n' % c +
+                           'timeout %d ' % (dwell + 3) + CH +
+                           'tcpdump -i wlan0 -s 0 -w /tmp/sw_%d.pcap '
+                           '2>/dev/null\n' % i)
+            else:
+                script += ('timeout %d ' % (dwell + 4) +
+                           CH + 'hcxdumptool -i wlan0 -c %da '
+                               '-w /tmp/sw_%d.pcapng -t %d --rds=2 '
+                               '2>/dev/null\n' % (c, i, dwell))
             # Flush per channel. Field-measured Nov 15: the card enumerates,
             # binds rt2800usb, and dies ~40s later. A round that converts only
             # at the end therefore delivers ZERO hashes on a dying card.
-            script += (CH + 'hcxpcapngtool --all -o /tmp/sw_%d.22000 '
+            script += (CH + 'timeout 20 hcxpcapngtool --all -o /g/tmp/sw_%d.22000 '
                           '/tmp/sw_%d.pcapng* 2>/dev/null\n' % (i, i) +
                        CH + 'cat /tmp/sw_%d.22000 2>/dev/null\n' % i +
                        'echo SWEEPCH %d\n' % c)
-        if any(c in (36, 40, 44, 48) for c in ch5):
-            # one PHY re-tune per round instead of one per channel: the
+        if any(c in (36, 40, 44, 48) for c in ch5) and False:
+            # Disabled: this is the write the field reports as TXPOWFAIL. instead of one per channel: the
             # 3000<->1000 ping-pong is register churn we do not need.
             script += (CH + 'iw dev wlan0 set txpower fixed 1000 2>&1'
                        ' | grep -q . && echo TXPOWFAIL\n')
         for j, (c, w) in enumerate(ch5.items()):
             dwell5 = 3 if pre else min(30, 12 + 2 * w)
             total += dwell5 + (2 if pre else 5)
-            if c in (36, 40, 44, 48):
+            if c in (36, 40, 44, 48) and not pre:
                 script += ('timeout %d ' % (dwell5 + 4) + CH +
                            'hcxdumptool -i wlan0 -c %db '
                            '-w /tmp/sw5_%d.pcapng -t %d --rds=2 '
@@ -1349,7 +1393,7 @@ class App:
                            'timeout %d ' % (dwell5 + 3) + CH +
                            'tcpdump -i wlan0 -s 0 -w /tmp/sw5_%d.pcap '
                            '2>/dev/null\n' % j)
-            script += (CH + 'hcxpcapngtool --all -o /tmp/sw5_%d.22000 '
+            script += (CH + 'timeout 20 hcxpcapngtool --all -o /g/tmp/sw5_%d.22000 '
                           '/tmp/sw5_%d.pcap* 2>/dev/null\n' % (j, j) +
                        CH + 'cat /tmp/sw5_%d.22000 2>/dev/null\n' % j +
                        'echo SWEEPCH %d\n' % c)
@@ -1480,7 +1524,7 @@ IFR +
                   CH + 'iw dev wlan0 set channel %s 2>/dev/null\nsleep 3\n' % ch +
                   capcmd +
                   'echo "===CONVERT==="\n' +
-                  CH + 'hcxpcapngtool --all -o /tmp/scan_%d.22000 /tmp/scan_%d '
+                  CH + 'timeout 20 hcxpcapngtool --all -o /g/tmp/scan_%d.22000 /tmp/scan_%d '
                        '2>&1 | tail -4\n' % (rnd, rnd) +
                   'echo "===HASH==="\n' +
                   CH + 'cat /tmp/scan_%d.22000 2>/dev/null\n' % rnd +
