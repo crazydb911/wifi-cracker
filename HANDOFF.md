@@ -129,3 +129,29 @@ sudo nohup /opt/homebrew/bin/qemu-system-aarch64 -machine virt -cpu cortex-a72 -
 
 ## 回滾
 `git revert 9bbbf62b` 或 `git checkout 1594d410 -- mac_wifi_app_v2.py`，再推 Mac 並 `kickstart`。
+
+
+## 2026-11-15 傍晚現場實測（使用者拔插兩次，左孔→另一孔）
+
+### 已證明（工具輸出為證）
+- **每頻道立即轉換上傳補丁有效**：18:36:43 預熱 → 18:37:17 `cycle ch=3 raw=0 new=0`，34 秒跑完，**沒有 vm_down**。這是第一次跑完整輪。
+- **卡壽命實測 45 秒**（18:24:26 wlan0 出現 → 18:25:11 消失）。
+- **`raw=0`**：hcxpcapngtool 一顆 hash 都沒吐。不是重複問題（hash 池 1892 行未成長）。
+- **RX 沒有壞**：介面停在 channel 36(5G) 時 tcpdump 0 packets；`iw dev wlan0 set channel 1` 後 12 秒抓到 **3 packets**。所以「零封包」是**頻道假象**，不是硬體死。
+- **真正的瓶頸是產量**：hcxpcapngtool 明說 `This dump file does not contain enough EAPOL M1 frames` —— 收到 beacon/probe，**收不到握手**。
+- `iw dev wlan0 info`：`type monitor` 正常、`txpower 23.00 dBm`（驅動封頂）。A7（monitor 沒人設）此刻未咬。
+- `iw dev wlan0 scan` 回 **0 BSS**（monitor 模式下韌體掃描不給結果，不能當成「掃不到」）。
+- survey：2412 MHz active time 1309 ms → 無線有感应到能量。
+- hcxdumptool 自報 `3 ERROR(s) during runtime: mostly caused by a broken driver`。
+- `TXPOWFAIL` 觸發兩次 → PHY 拒絕降功率。
+
+### 環境變更（重要）
+- **Tailscale 已啟動**：Mac = `100.64.239.76` (`macbook-air-8`)，Windows = `100.94.10.122` 在線。**使用者出門後仍可遠端讀 Mac**。LAN IP 仍 192.168.1.117。
+- 睡眠設定：AC 與電池皆 `sleep 0`、`displaysleep 0`、`disksleep 0`，另有常驻 caffeinate（pid 421）→ **不會自動睡眠**。但**關蓋仍會睡**。
+- **電池警訊**：78%、`Charging: No`、适配器 `Wattage 15W`（M2 Air 需 30W+）。負載下可能邊充邊掉。Cycle 31 / Condition Normal / Max Capacity 100% → 電池本體健康，是**供電不足**。
+- 監視器換成不限量迴圈 `/tmp/field_watch.sh`（pid 30222）→ `/tmp/field_watch.log`。
+
+### 未完成 / 下一步
+- 零 hash 的根因尚未收斂：要區分「hcxdumptool 主動攻擊沒打出流量」與「45 秒內本來就抓不到握手」。做法：在 busy 2.4G 頻道跑 `aireplay` 式 deauth 或拉長單頻道 dwell，同時看 EAPOL 計數。
+- 5G 主動注入仍未證明（BEACON 有、PROBERESPONSE 0）。
+- 待修清單 A4/A7/A8/A10/C2/C4/C6/C7/C8/C9/C10 未動。
