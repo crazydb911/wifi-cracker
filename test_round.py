@@ -54,8 +54,20 @@ print('=== A3: scan script has balanced for/done ===')
 for n in ast.walk(t):
     if isinstance(n, ast.FunctionDef) and n.name == '_scan_now':
         seg = ast.get_source_segment(src, n)
-        chk('exactly one done terminator', seg.count("'done\\n')") == 1)
+        # The invariant A3 actually guards is balance, not a literal count: an
+        # unmatched done makes the guest shell exit non-zero. The focused scan
+        # dropped the shell loop entirely, so the old "== 1" assertion was
+        # encoding structure rather than the bug.
+        opens, closes = seg.count('; do\\n'), seg.count('done\\n')
+        chk('shell loop terminators balanced (A3 rc!=0 trap)', opens == closes,
+            '(do=%d done=%d)' % (opens, closes))
         chk('no stray double done', 'done\\ndone' not in seg)
+        chk('scan no longer blind-sweeps all 22 channels every round',
+            'for ch in 1 2 3 4 5 6 7 8 9 10 11 12 13 14' not in seg)
+        chk('empty pool falls back to a full blind sweep (new place stays visible)',
+            'blind_full' in seg and 'ALL_CH' in seg)
+        chk('cold channels rotate instead of being dropped',
+            '_scan_turn' in seg and 'cold' in seg)
 
 print('=== C1: UI error log no longer uses an out-of-scope NL ===')
 for n in ast.walk(t):

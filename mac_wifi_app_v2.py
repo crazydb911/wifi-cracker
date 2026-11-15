@@ -864,16 +864,59 @@ class App:
         if not self.vm_ready(timeout=8):
             self._ui(lambda: self._set_text(self.lbl_scan, '⏳ 虛擬機未就緒', C_AMBER))
             return
+        # Channel budget. Every set-channel is a PHY retune, and the fixed
+        # 22-channel sweep costs ~55s per round whether or not anything is
+        # there. _ap_pool already keeps APs fresh for 120s across rounds, so a
+        # channel skipped this round does not lose its networks - which means
+        # dwell can move to where APs actually live. An empty pool means a new
+        # place, and there the full blind sweep is mandatory: cutting channels
+        # before anything has been seen would make a fresh location invisible,
+        # which is the one thing this app must never do.
+        ALL_CH = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+                  36, 40, 44, 48, 149, 153, 157, 161]
+        pool0 = getattr(self, '_ap_pool', {})
+        stamp = time.time()
+        seen_ch = set()
+        for v in pool0.values():
+            try:
+                if stamp - v[1] < 300:
+                    seen_ch.add(int(v[0][2]))
+            except (TypeError, ValueError, IndexError):
+                pass
+        hot = sorted(c for c in ALL_CH if c in seen_ch)
+        rest = [c for c in ALL_CH if c not in seen_ch]
+        # Rotate the cold half so nothing stays invisible forever; two rounds
+        # still cover every channel, but the busy ones get watched every round.
+        turn = getattr(self, '_scan_turn', 0)
+        self._scan_turn = turn + 1
+        if not hot:
+            warm, cold, mode = ALL_CH, [], 'blind_full'
+        else:
+            half = max(1, len(rest) // 2)
+            off = (turn * half) % max(1, len(rest))
+            cold = [rest[(off + i) % len(rest)] for i in range(half)]
+            warm, mode = hot, 'focused'
+
+        def sweep(chs, dwell):
+            body = ''
+            for c in chs:
+                body += (CH + '  /usr/sbin/iw dev wlan0 set channel %d '
+                         '2>/dev/null\n' % c +
+                         '  echo "MARK:%d"\n' % c +
+                         CH + '  timeout %s /usr/bin/tcpdump -i wlan0 -e -n '
+                         '2>/dev/null\n' % dwell)
+            return body
+
+        est = len(warm) * 2.5 + len(cold) * 1.2
+        self._ev('scan', '%s warm=%d cold=%d est=%.0fs'
+                 % (mode, len(warm), len(cold), est))
+        # sweep() already enumerates in Python, so no shell loop wraps it - a
+        # loop here would re-run the whole channel list once per channel.
         script = (BIND +
                   IFR +
                   CH + 'iw reg set TW 2>/dev/null\nsleep 1\n' +
-                  'for ch in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 '
-                  '36 40 44 48 149 153 157 161; do\n' +
-                  CH + '  /usr/sbin/iw dev wlan0 set channel $ch 2>/dev/null\n' +
-                  '  echo "MARK:$ch"\n' +
-                  CH + '  timeout 2.5 /usr/bin/tcpdump -i wlan0 -e -n '
-                  '2>/dev/null\n' +
-                  'done\n')
+                  sweep(warm, '2.5') +
+                  (sweep(cold, '1.2') if cold else ''))
         try:
             with self._cap_lock:
                 r = subprocess.run(VM_SSH.split() + ['sh', '-s'], input=script.encode(),
