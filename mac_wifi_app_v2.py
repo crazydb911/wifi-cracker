@@ -944,6 +944,17 @@ class App:
                   # the single reader. -l keeps it line-buffered so MARK lines
                   # land between packets in the right order.
                   'pkill -f "tcpdump -i wlan0" 2>/dev/null; sleep 1\n'
+                  # TX liveness instrument. The root cause found in the guest
+                  # log is that the TX status endpoint dies while RX keeps
+                  # working - the fingerprint is 13 BEACON / 0 PROBERESPONSE.
+                  # That claim is only testable if the two counters are read
+                  # around the sweep, so read them. sysfs is read directly and
+                  # NA-tolerant: a guest without the mount must not turn a
+                  # working scan into a failed one.
+                  'TXRX0 $(cat /sys/class/net/wlan0/statistics/tx_packets '
+                  '2>/dev/null || echo NA) '
+                  '$(cat /sys/class/net/wlan0/statistics/rx_packets '
+                  '2>/dev/null || echo NA)\n' +
                   ': > %s\n' % SCANF_OUT +
                   CH + '/usr/bin/tcpdump -i wlan0 -e -n -l >> %s '
                   '2>/dev/null &\n' % SCANF_IN +
@@ -952,12 +963,17 @@ class App:
                   (sweep(cold, '1.2') if cold else '') +
                   'pkill -f "tcpdump -i wlan0" 2>/dev/null\n'
                   'sleep 1\n'
+                  'TXRX1 $(cat /sys/class/net/wlan0/statistics/tx_packets '
+                  '2>/dev/null || echo NA) '
+                  '$(cat /sys/class/net/wlan0/statistics/rx_packets '
+                  '2>/dev/null || echo NA)\n' +
                   'cat %s\n' % SCANF_OUT);
         try:
             with self._cap_lock:
                 r = subprocess.run(VM_SSH.split() + ['sh', '-s'], input=script.encode(),
                                    capture_output=True, timeout=240)
             out = (r.stdout or b'').decode('utf-8', 'replace')
+            self._tx_liveness(out)
             aps = self._parse_scan(out)
             now = time.time()
             pool = getattr(self, '_ap_pool', {})
@@ -1035,6 +1051,40 @@ class App:
                 time.sleep(2)
                 self._startup_vm()
             self._ui(lambda: self._set_text(self.lbl_scan, '⚠️ 掃描失敗', C_RED))
+
+    def _tx_liveness(self, out):
+        """Report tx/rx deltas across a sweep.
+
+        The failure this app has been chasing is asymmetric: the TX status
+        endpoint stalls with -EPROTO while reception keeps working, so a
+        sweep can look healthy (beacons arriving) while nothing the card
+        transmits ever leaves it - which is exactly why no EAPOL appears.
+        Without these two counters that stays a story told after the fact;
+        with them, a dead transmit path is a number visible the same round.
+        """
+        a = b = None
+        for line in out.splitlines():
+            ls = line.strip()
+            if ls.startswith('TXRX0 '):
+                a = ls.split()[1:3]
+            elif ls.startswith('TXRX1 '):
+                b = ls.split()[1:3]
+        if not a or not b:
+            self._ev('txrx', 'counters_unavailable')
+            return
+        try:
+            tx = int(b[0]) - int(a[0])
+            rx = int(b[1]) - int(a[1])
+        except (ValueError, IndexError):
+            self._ev('txrx', 'counters_unavailable')
+            return
+        self._ev('txrx', 'tx=%d rx=%d' % (tx, rx))
+        # A sweep that received and transmitted nothing is the dead-TX
+        # signature. Say it while the card is still in the socket.
+        if rx > 0 and tx == 0:
+            self._ev('txrx', 'TX_DEAD_rx=%d' % rx)
+            self._log('⚠️ 本輪收到 %d 封包但發出 0 — 傳送路徑已死，'
+                      '握手抓不到，請拔插網卡' % rx)
 
     @staticmethod
     def _parse_scan(out):
