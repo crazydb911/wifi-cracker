@@ -207,6 +207,35 @@ for m in re.finditer(r'-o (\S+?\.22000)', s1):
 chk('every converter output is read back from the same path', not bad, str(bad))
 chk('no path depends on a directory nothing creates', '/g/tmp' not in s1)
 
+
+# ssh joins argv with spaces and hands the result to one remote shell, so any
+# quoting in an argument is destroyed in transit. 'sh -c "ls /a/*.pcap"'
+# arrives as sh -c with a bare ls and the glob as an unread positional: the
+# listing comes back empty and the caller reads that as 'no files'. Every
+# guest call here must carry its script on stdin instead.
+def _ssh_sh_c(s):
+    # Only the ssh path loses quoting: ssh joins argv with spaces and hands
+    # one string to the remote shell. A local sh -c is fine and there are
+    # six of those for ioreg and the monitor, so the guard has to be
+    # scoped to the calls that actually cross the wire.
+    bad = []
+    L = s.split(chr(10))
+    needle = "['sh', '-c']"
+    for n, t in enumerate(L):
+            if needle in chr(10).join(L[n:n + 3]):
+                bad.append(n + 1)
+    return bad
+
+chk('no guest call uses sh -c', not _ssh_sh_c(src),
+    'lines ' + str(_ssh_sh_c(src)))
+
+# The capture pull is the only reason conversion can be deferred out of the
+# harvest window, so it has to be asserted to exist for both capture paths,
+# not just the one that was tested when it was written.
+chk('both capture paths are pulled out of the guest',
+    "'cold')" in src and "'sweep')" in src
+    and src.count('_pull_guest_caps(') >= 3,
+    'pulls=%d' % src.count('_pull_guest_caps('))
 print('=== static: interface reset is opt-in only ===')
 chk('IF_RESET default is opt-in file', "IF_RESET = os.path.exists" in src)
 chk('ifreset.on gate present', 'ifreset.on' in src)

@@ -1724,6 +1724,11 @@ class App:
         if getattr(self, '_cold_caps', False):
             self._cold_caps = False
             self._pull_guest_caps('/newroot/tmp/cold*.pcapng*', 'cold')
+        # The sweep rounds wrote sw_*.pcapng (hcxdumptool, active) and
+        # sw5_*/sw_*.pcap (tcpdump, passive) and never fetched either. They
+        # are different captures of the same airtime, so both are worth
+        # keeping; the capstore cap and the backup loop bound the cost.
+        self._pull_guest_caps('/newroot/tmp/sw*.pcap*', 'sweep')
         # Cold-path survival, in the tool's own terms rather than inferred.
         # rcascan's help defines the reading: no PROBERESPONSE means injection
         # is broken. Saying which of the two happened, in the round it
@@ -2087,41 +2092,56 @@ IFR +
             self._log('⚠️ 存本機: %r' % e)
 
     def _pull_guest_caps(self, pat, tag):
-        # The raw capture is the asset, and until now the cold and sweep rounds
-        # left theirs inside the guest, where a QEMU restart erases them and a
-        # full guest disk silently stops new ones. Only the scan path fetched
-        # anything. Hashes cannot be turned back into a capture; the reverse
-        # always works, so the capture is what has to leave.
+        # The raw capture is the asset, and until now the cold and sweep
+        # rounds left theirs inside the guest, where a QEMU restart erases
+        # them and a full guest disk silently stops new ones. Only the scan
+        # path fetched anything. Hashes cannot be turned back into a
+        # capture; the reverse always works, so the capture is what has to
+        # leave.
         #
-        # The guest copy is removed after a verified pull. That keeps the next
-        # round from re-fetching the same bytes and keeps /newroot/tmp off the
-        # ENOSPC cliff that once made 5G writes produce zero packets.
+        # The script goes over stdin with sh -s, like every other guest
+        # call here. sh -c does not survive the trip: ssh joins argv with
+        # spaces and hands one string to the remote shell, so the quoting
+        # is gone and 'sh -c ls /newroot/tmp/cold*.pcapng*' arrives as
+        # sh -c with a bare 'ls' -- the glob becomes a positional
+        # argument nothing reads, the listing comes back empty, and every
+        # capture stays in the guest while the event log cheerfully
+        # reports pulled=0 of=0.
         try:
             r = subprocess.run(
-                VM_SSH.split() + ['sh', '-c', 'ls %s 2>/dev/null' % pat],
+                VM_SSH.split() + ['sh', '-s'],
+                input=('ls %s 2>/dev/null\n' % pat).encode(),
                 capture_output=True, timeout=30)
             paths = [x.strip() for x in
                      (r.stdout or b'').decode('utf8', 'replace').split('\n')
-                     if x.strip().endswith(('.pcapng', '.pcapng_1'))]
+                     if x.strip().endswith(('.pcapng', '.pcapng_1',
+                                      '.pcap', '.pcap_1', '.pcapng_2'))]
             got = 0
             for p in paths:
                 c = subprocess.run(VM_SSH.split() + ['cat', p],
                                    capture_output=True, timeout=180)
                 data = c.stdout or b''
                 if len(data) < 100:
+                    # A stub this small is a write that died, most often
+                    # the ENOSPC that once made 5G produce zero packets.
+                    # Delete it or it is re-listed on every round forever.
+                    subprocess.run(VM_SSH.split() + ['rm', '-f', p],
+                                   capture_output=True, timeout=30)
+                    self._ev('pcap', '%s_stub_removed size=%d' % (
+                        tag, len(data)))
                     continue
                 os.makedirs(CAPSTORE, exist_ok=True)
                 dst = os.path.join(CAPSTORE, '%s-%s-%s' % (
                     tag, time.strftime('%Y%m%d-%H%M%S'),
                     os.path.basename(p)))
-                with open(dst, 'wb') as f:
-                    f.write(data)
+                with open(dst, 'wb') as fh:
+                    fh.write(data)
                 got += 1
                 subprocess.run(VM_SSH.split() + ['rm', '-f', p],
                                capture_output=True, timeout=30)
             self._ev('pcap', '%s_pulled=%d of=%d' % (tag, got, len(paths)))
-        except Exception as e:
-            self._ev('pcapfail', '%s %r' % (tag, e))
+        except Exception as ex:
+            self._ev('pcapfail', '%s %r' % (tag, ex))
 
     def _save_pcap(self, rnd, ssid, bssid):
         try:
