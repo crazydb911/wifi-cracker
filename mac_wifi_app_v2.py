@@ -1560,6 +1560,14 @@ IFR +
                 rnd, ' | '.join(cap_part)[:400]))
             streak = getattr(self, '_cap_streak', 0) + 1
             self._cap_streak = streak
+            # raw==0 means the capture delivered nothing at all, and the
+            # "quiet AP" branch above deliberately skips it. Without this the
+            # result pane keeps a stale line and in the field a user cannot
+            # tell a silent AP from a deaf card.
+            self._result('⚠️ 本輪抓包零產出（連續 %d 輪）— 網卡可能已離線'
+                         % streak, C_AMBER)
+            self.set_phase('cap', '抓包零產出 %d 輪' % streak,
+                           '等自動重建抓包環境', C_AMBER)
             if streak >= 3:
                 self._cap_streak = 0
                 self._log('⚙️ 抓包連續失敗 → 重建抓包環境(QEMU重啟)')
@@ -1657,9 +1665,13 @@ IFR +
             cnt = 0
             for b, ls in byb.items():
                 ent = self.aps_seen.get(b) or self.aps_seen.get(b.upper())
-                if not ent:
-                    continue
-                ssid = ent[0] or 'wifi'
+                if ent:
+                    ssid = ent[0] or 'wifi'
+                else:
+                    # Not in the scan list. Dropping it here left the hash in
+                    # hash_pool only, which the next hash_pool.clear() erases
+                    # — a captured hash that never reaches disk.
+                    ssid = 'unknown_%s' % b.replace(':', '')
                 if ckd.get(ssid):
                     continue
                 self._save_local_bssid(ssid, b, ls)
