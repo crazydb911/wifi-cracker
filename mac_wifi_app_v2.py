@@ -1474,6 +1474,71 @@ class App:
             return 0
         total = 0
         n_ch = len(chans) + len(ch5)
+        TXR = ('$(cat /sys/class/net/wlan0/statistics/tx_packets 2>/dev/null'
+               ' || echo NA) $(cat /sys/class/net/wlan0/statistics/rx_packets'
+               ' 2>/dev/null || echo NA)')
+        if pre:
+            # Cold phy - and on a replug this is the only window that matters.
+            #
+            # The guest log says transmit dies (TX status FIFO -EPROTO from
+            # t=101.3s, every 5.0s retry failing forever) while reception keeps
+            # working. A passive tcpdump preheat never transmits at all, so it
+            # spends the entire healthy window proving nothing about the one
+            # thing that is broken. Go active immediately.
+            #
+            # One process, not one per channel: the help text states
+            # "-c <digit> : set channel (1a,2a,36b,...) default: 1a,6a,11a",
+            # so a channel list is native and hcxdumptool hops internally. It
+            # pays the interface-mode init once instead of once per channel,
+            # which is the promiscuous churn the log ties to the wedge.
+            #
+            # --rcascan=active is the tool's own injection test; its help
+            # defines the reading for us: "no PROBERESPONSE, AP is out of
+            # RANGE, packet injection is broken". That is the question this
+            # app has been circling for days via BEACON counts.
+            #
+            # --errormax defaults to 100 and a half-dead transmit path floods
+            # errors, so hcxdumptool was quitting itself mid-capture. Raised.
+            # --exitoneapol=1 ends the harvest the instant a PMKID lands -
+            # on a card with a measured 45s life, stopping early is free and
+            # continuing is what loses everything.
+            script += ('rm -f /tmp/cold*.pcapng* 2>/dev/null\n'
+                       'TXRX0 %s\n' % TXR +
+                       'timeout 30 ' + CH + 'hcxdumptool -i wlan0 '
+                       '-c 1a,6a,11a --rcascan=active --rds=4 --rdt '
+                       '--errormax=100000 -t 4 -w /tmp/cold1.pcapng '
+                       '2>&1 | tail -45\n'
+                       'echo COLD24_DONE\n' +
+                       CH + 'timeout 20 hcxpcapngtool --all -o /g/tmp/cold1.22000 '
+                       '/tmp/cold1.pcapng* 2>/dev/null\n' +
+                       CH + 'cat /tmp/cold1.22000 2>/dev/null\n' +
+                       'timeout 25 ' + CH + 'hcxdumptool -i wlan0 '
+                       '-c 1a,6a,11a --rds=2 --rdt --exitoneapol=1 '
+                       '--errormax=100000 -t 5 -w /tmp/cold2.pcapng '
+                       '2>&1 | tail -20\n' +
+                       'echo COLDHARVEST_DONE\n' +
+                       CH + 'timeout 20 hcxpcapngtool --all -o /g/tmp/cold2.22000 '
+                       '/tmp/cold2.pcapng* 2>/dev/null\n' +
+                       CH + 'cat /tmp/cold2.22000 2>/dev/null\n' +
+                       'timeout 25 ' + CH + 'hcxdumptool -i wlan0 '
+                       '-c 36b,40b,44b,48b --rcascan=active --rds=4 --rdt '
+                       '--errormax=100000 -t 4 -w /tmp/cold3.pcapng '
+                       '2>&1 | tail -45\n' +
+                       'echo COLD5G_DONE\n'
+                       'TXRX1 %s\n' % TXR +
+                       CH + 'timeout 20 hcxpcapngtool --all -o /g/tmp/cold3.22000 '
+                       '/tmp/cold3.pcapng* 2>/dev/null\n' +
+                       CH + 'cat /tmp/cold3.22000 2>/dev/null\n' +
+                       'echo COLDSCAN_DONE\n')
+            total += 145
+            self._ev('cold', 'active-first 1a,6a,11a + 36b-48b rcascan '
+                             'exitoneapol=1 errormax=100000')
+            # Empty the per-channel maps rather than returning early: the
+            # single execution point lives below both loops, and returning
+            # here would build a script and never run it.
+            chans = {}
+            ch5 = {}
+            n_ch = 0
         for i, (c, w) in enumerate(sorted(chans.items(),
                                           key=lambda kv: -kv[1])):
             dwell = 4 if pre else min(45, 8 + 3 * w)
@@ -1564,6 +1629,20 @@ class App:
                 f.write('\n'.join(new) + '\n')
             self.hash_pool.update(new)
             self._enqueue_sweep_hits(new)
+        # Cold-path survival, in the tool's own terms rather than inferred.
+        # rcascan's help defines the reading: no PROBERESPONSE means injection
+        # is broken. Saying which of the two happened, in the round it
+        # happened, is the difference between a measurement and a hope.
+        if 'COLD24_DONE' in out or 'COLD5G_DONE' in out:
+            pr = out.count('PROBERESPONSE') + out.count(' PROBEREQUEST')
+            self._ev('cold', 'phases=%d/%d proberesp=%d'
+                     % (out.count('COLD24_DONE') + out.count('COLDHARVEST_DONE')
+                        + out.count('COLD5G_DONE') + out.count('COLDSCAN_DONE'),
+                        4, pr))
+            if 'COLD24_DONE' in out and pr == 0:
+                self._ev('cold', 'INJECTION_DEAD per rcascan definition')
+                self._log('⚠️ 主動掃描收到 0 個 PROBERESPONSE — '
+                          '注入路徑已死（hcxdumptool 官方定義）')
         done_ch = out.count('SWEEPCH')
         if done_ch < n_ch:
             # how long the card actually lived, in channels it finished.

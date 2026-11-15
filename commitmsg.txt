@@ -1,0 +1,21 @@
+cold round goes active-first: rcascan injection test, channel lists, per-phase flush
+
+Transmit dies (TX status FIFO -EPROTO every 5.0s) while reception keeps
+working, so a passive preheat spent the only healthy window proving nothing
+about the one thing that was broken. hcxdumptool takes channel lists
+natively (help: "-c <digit> : set channel (1a,2a,36b,...) default: 1a,6a,11a"),
+so one process per band hops internally and pays the interface mode init
+once instead of once per channel.
+
+--rcascan=active is the tool own injection test: its help defines "no
+PROBERESPONSE" as broken packet injection, which is the question this app
+circled for days through BEACON counts. --exitoneapol=1 stops the harvest
+the instant a PMKID lands. --errormax was left at the default 100, which a
+half-dead transmit path floods, so hcxdumptool quit itself mid-capture.
+
+Each phase converts and cats on its own so a card dying during the 5G
+phase still delivers the 2.4G hashes. hcxpcapngtool is pure CPU and never
+touches the USB card, so per-phase conversion costs the card nothing.
+
+Verified: probe_cold 23/23, test_sweepgen ALL PASS, test_round ALL PASS.
+Field effect still unobserved: the card has been off the bus throughout.

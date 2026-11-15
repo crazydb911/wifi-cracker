@@ -72,24 +72,33 @@ print('  budget total=%ds  txpower writes=%d  ifconfig=%d'
       % (t1, s1.count('set txpower'), s1.count('ifconfig')))
 chk('no ifconfig down/up in generated script', 'ifconfig' not in s1)
 chk('txpower written at most twice per round', s1.count('set txpower') <= 2)
-# Preheat is now fully passive by design: every hcxdumptool start does its own
-# interface mode init, and 7 of those inside the first 45s is the leading
-# suspect for card life falling from seven minutes to 45 seconds.
-chk('preheat issues ZERO hcxdumptool starts (mode-free)', s1.count('hcxdumptool') == 0,
-    '(got %d)' % s1.count('hcxdumptool'))
-chk('preheat captures passively on all 7 channels', s1.count('tcpdump -i wlan0') == 7,
-    '(got %d)' % s1.count('tcpdump -i wlan0'))
-chk('preheat still tunes each channel explicitly', s1.count('iw dev wlan0 set channel') >= 7,
-    '(got %d)' % s1.count('iw dev wlan0 set channel'))
-chk('preheat tunes the universal 2.4G set 1/6/11',
-    all(('iw dev wlan0 set channel %d' % c) in s1 for c in (1, 6, 11)))
+# Cold round is active-first by design. The guest log shows transmit dying
+# (TX status FIFO -EPROTO, every 5.0s retry failing) while reception keeps
+# working, so a passive preheat spends the only healthy window proving
+# nothing about the one thing that is broken. hcxdumptool takes a channel
+# list natively -- its help reads "-c <digit> : set channel (1a,2a,36b,...)
+# default: 1a,6a,11a" -- so one process hops internally and pays the
+# interface mode init once per band instead of once per channel.
+chk('cold round goes active on both bands', s1.count('hcxdumptool -i wlan0') == 3,
+    '(got %d)' % s1.count('hcxdumptool -i wlan0'))
+chk('cold round issues no tcpdump', 'tcpdump -i wlan0' not in s1)
+chk('cold round hops with channel lists',
+    '-c 1a,6a,11a' in s1 and '-c 36b,40b,44b,48b' in s1)
+chk('cold round puts the injection question to the tool itself',
+    s1.count('--rcascan=active') == 2, '(got %d)' % s1.count('--rcascan=active'))
+chk('harvest stops on the first PMKID', s1.count('--exitoneapol=1') == 1)
+chk('errormax raised off the default 100', s1.count('--errormax=100000') == 3,
+    '(got %d)' % s1.count('--errormax=100000'))
+chk('cold round does not re-tune per channel', 'iw dev wlan0 set channel' not in s1)
+chk('tx/rx counters bracket the captures',
+    s1.find('TXRX0 ') >= 0 and s1.find('TXRX1 ') > max(
+        i for i in range(len(s1)) if s1.startswith('hcxdumptool', i)))
 chk('stale 149/153 suppressed', '149b' not in s1 and '153b' not in s1)
-chk('preheat budget under 60s', t1 < 60, '(got %ds)' % t1)
 chk('txpower written at most once per session (ping-pong off)', s1.count('set txpower') <= 1,
     '(got %d)' % s1.count('set txpower'))
 chk('rejected 5G back-off write removed', 'set txpower fixed 1000' not in s1)
 chk('converters wrapped in timeout so a hang cannot eat the ssh budget',
-    s1.count('timeout 20 hcxpcapngtool') >= 5, '(got %d)' % s1.count('timeout 20 hcxpcapngtool'))
+    s1.count('timeout 20 hcxpcapngtool') == 3, '(got %d)' % s1.count('timeout 20 hcxpcapngtool'))
 
 print('=== steady round (map-driven) ===')
 s2, t2 = ns['gen'](T(dict(oldmap), True))
@@ -118,34 +127,33 @@ chk('no steady round re-writes txpower more than once',
 chk('txpower re-armed for a fresh session then not repeated',
     s2.count('set txpower') <= 1, '(got %d)' % s2.count('set txpower'))
 
-print('=== per-channel flush (card dies ~40s after enumeration) ===')
-CAP = ('hcxdumptool -i wlan0', 'tcpdump -i wlan0')
-pos = sorted([s1.find(k) for k in CAP for _ in [0]
-              if s1.find(k) >= 0] +
-             [i for i in range(len(s1))
-              if s1.startswith(CAP, i)])
-pos = sorted(set(pos))
-chk('preheat round issues %d captures' % len(pos), len(pos) == 7, '(got %d)' % len(pos))
+print('=== per-phase flush (card dies ~45s after enumeration) ===')
+pos = sorted(set(i for i in range(len(s1)) if s1.startswith('hcxdumptool', i)))
+chk('cold round issues %d captures' % len(pos), len(pos) == 3, '(got %d)' % len(pos))
 gaps = []
 for a, b in zip(pos, pos[1:] + [len(s1)]):
-    seg = s1[a:b]
-    if 'hcxpcapngtool' not in seg or 'cat /tmp/sw' not in seg:
+    if 'hcxpcapngtool' not in s1[a:b]:
         gaps.append(a)
-chk('every capture is followed by its own convert+cat', not gaps, str(gaps))
-chk('per-channel marker emitted once per capture',
-      s1.count('echo SWEEPCH') == len(pos),
-      '(%d vs %d)' % (s1.count('echo SWEEPCH'), len(pos)))
+chk('every capture is followed by its own convert', not gaps, str(gaps))
+chk('each phase writes a distinct pcapng',
+      all(('-w /tmp/cold%d.pcapng ' % k) in s1 for k in (1, 2, 3)))
+chk('each convert cats its hashes back through ssh',
+      s1.count('cat /tmp/cold') == 3, '(got %d)' % s1.count('cat /tmp/cold'))
 first_flush = s1.find('hcxpcapngtool')
-chk('first flush happens early in the script',
-      first_flush > 0 and first_flush < len(s1) // 3,
-      '(offset %d of %d)' % (first_flush, len(s1)))
-chk('end-only bulk convert is gone',
-      '/tmp/sw.22000' not in s1 and '/tmp/sw_*.pcapng*' not in s1)
-chk('preheat budget fits inside measured 40s card life',
-      t1 <= 40, '(got %ds)' % t1)
+chk('first flush lands before the 5G phase',
+      0 < first_flush < s1.find('-c 36b,40b,44b,48b'),
+      '(offset %d)' % first_flush)
+# The cold round is deliberately longer than the measured 45s card life.
+# Each phase converts and cats on its own, so a card that dies during the
+# 5G phase still delivers the 2.4G hashes over ssh. What must never come
+# back is an end-only bulk convert, which is how a whole round was lost.
+chk('no end-only bulk convert',
+      '/tmp/sw.22000' not in s1 and 'cat /tmp/sw' not in s1)
+chk('cold budget stays inside the ssh timeout', t1 <= 145, '(got %ds)' % t1)
+CAP2 = ('hcxdumptool -i wlan0', 'tcpdump -i wlan0')
 chk('steady round also flushes per channel',
       s2.count('echo SWEEPCH') == len([i for i in range(len(s2))
-                                       if s2.startswith(CAP, i)]))
+                                       if s2.startswith(CAP2, i)]))
 
 print('=== static: interface reset is opt-in only ===')
 chk('IF_RESET default is opt-in file', "IF_RESET = os.path.exists" in src)
