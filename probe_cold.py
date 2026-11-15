@@ -30,6 +30,7 @@ class S:
     def _enqueue_sweep_hits(self, new): pass
     def set_phase(self, *a, **k): pass
 S._sweep_round = App._sweep_round
+S._pull_guest_caps = App._pull_guest_caps
 s = S(); CAP.clear(); EV.clear()
 r = s._sweep_round()
 sc = CAP[0] if CAP else ""

@@ -158,15 +158,28 @@ gaps = []
 for a, b in zip(pos, pos[1:] + [len(s1)]):
     if 'hcxpcapngtool' not in s1[a:b]:
         gaps.append(a)
-chk('every capture is followed by its own convert', not gaps, str(gaps))
+chk('every capture is converted in the same round',
+    all('hcxpcapngtool' in s1[a:] for a in pos), str(pos))
 chk('each phase writes a distinct pcapng',
       all(('-w /tmp/cold%d.pcapng ' % k) in s1 for k in (1, 2)))
 chk('each convert cats its hashes back through ssh',
       s1.count('cat /tmp/cold') == 2, '(got %d)' % s1.count('cat /tmp/cold'))
 first_flush = s1.find('hcxpcapngtool')
-chk('first flush lands before the 5G phase',
-      0 < first_flush < s1.find('-c 36b,40b,44b,48b'),
-      '(offset %d)' % first_flush)
+# The invariant moved. Conversion no longer trails each capture; it trails
+# every operation that needs a living radio. A conversion costs the card
+# nothing, so spending the harvest window on one was spending the only
+# scarce resource on work that could wait. It could not wait when the hash
+# was the only thing that ever left the guest -- the capture pull below is
+# what makes waiting safe, so both are asserted together.
+radio_end = max(s1.index('echo RCASCAN5G_DONE'), s1.index('-w /tmp/cold2.pcapng'))
+conv_start = min(s1.index('hcxpcapngtool --all -o /tmp/cold1'),
+                 s1.index('hcxpcapngtool --all -o /tmp/cold2'))
+chk('all radio work precedes all conversion', radio_end < conv_start,
+    'radio_end=%d conv_start=%d' % (radio_end, conv_start))
+chk('the raw capture is pulled out of the guest',
+    "_pull_guest_caps('/newroot/tmp/cold*.pcapng*', 'cold')" in src)
+chk('pulled captures are removed from the guest so the disk cannot fill',
+    "rm', '-f', p" in src)
 # The cold round is deliberately longer than the measured 45s card life.
 # Each phase converts and cats on its own, so a card that dies during the
 # 5G phase still delivers the 2.4G hashes over ssh. What must never come

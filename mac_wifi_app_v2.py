@@ -1521,6 +1521,15 @@ class App:
             # --exitoneapol=1 ends the harvest the instant a PMKID lands -
             # on a card with a measured 45s life, stopping early is free and
             # continuing is what loses everything.
+            self._cold_caps = True
+            # Everything that needs a living radio runs first, back to back;
+            # everything that needs only the guest's CPU runs last. glm-radio's
+            # point, applied all the way through: a conversion costs the card
+            # nothing, so interleaving three of them through the harvest window
+            # spent 30-45s of the only life the card has on work that could
+            # wait. It could not wait before, because the hash was the only
+            # thing that ever left the guest -- the capture pull added below
+            # removes that reason.
             script += ('rm -f /tmp/cold*.pcapng* 2>/dev/null\n'
                        'TXRX0 %s\n' % TXR +
                        'timeout 18 ' + CH + 'hcxdumptool -i wlan0 '
@@ -1528,18 +1537,12 @@ class App:
                        '--errormax=100000 -t 4 -w /tmp/cold1.pcapng '
                        '2>&1 | tail -20\n'
                        'echo COLD24_DONE\n' +
-                       CH + 'timeout 15 hcxpcapngtool --all -o /tmp/cold1.22000 '
-                       '/tmp/cold1.pcapng* 2>/dev/null\n' +
-                       CH + 'cat /tmp/cold1.22000 2>/dev/null\n' +
                        'timeout 16 ' + CH + 'hcxdumptool -i wlan0 '
                        '-c 36b,40b,44b,48b --rds=4 --rdt --exitoneapol=1 '
                        '--errormax=100000 -t 4 -w /tmp/cold2.pcapng '
                        '2>&1 | tail -20\n'
                        'echo COLD5G_DONE\n'
                        'TXRX1 %s\n' % TXR +
-                       CH + 'timeout 15 hcxpcapngtool --all -o /tmp/cold2.22000 '
-                       '/tmp/cold2.pcapng* 2>/dev/null\n' +
-                       CH + 'cat /tmp/cold2.22000 2>/dev/null\n' +
                        'echo RCASCAN24_START\n'
                        'timeout 10 ' + CH + 'hcxdumptool -i wlan0 '
                        '-c 1a,6a,11a --rcascan=active --rds=5 --rdt '
@@ -1549,7 +1552,13 @@ class App:
                        'timeout 10 ' + CH + 'hcxdumptool -i wlan0 '
                        '-c 36b,40b,44b,48b --rcascan=active --rds=5 --rdt '
                        '--errormax=100000 -t 3 2>&1 | tail -30\n'
-                       'echo RCASCAN5G_DONE\n'
+                       'echo RCASCAN5G_DONE\n' +
+                       CH + 'timeout 15 hcxpcapngtool --all -o /tmp/cold1.22000 '
+                       '/tmp/cold1.pcapng* 2>/dev/null\n' +
+                       CH + 'cat /tmp/cold1.22000 2>/dev/null\n' +
+                       CH + 'timeout 15 hcxpcapngtool --all -o /tmp/cold2.22000 '
+                       '/tmp/cold2.pcapng* 2>/dev/null\n' +
+                       CH + 'cat /tmp/cold2.22000 2>/dev/null\n' +
                        'echo COLDSCAN_DONE\n')
             total += 95
             self._ev('cold', 'harvest-first 1a,6a,11a + 36b-48b then '
@@ -1654,6 +1663,9 @@ class App:
                 f.write('\n'.join(new) + '\n')
             self.hash_pool.update(new)
             self._enqueue_sweep_hits(new)
+        if getattr(self, '_cold_caps', False):
+            self._cold_caps = False
+            self._pull_guest_caps('/newroot/tmp/cold*.pcapng*', 'cold')
         # Cold-path survival, in the tool's own terms rather than inferred.
         # rcascan's help defines the reading: no PROBERESPONSE means injection
         # is broken. Saying which of the two happened, in the round it
@@ -2015,6 +2027,43 @@ IFR +
                         f.write(l + '\n')
         except Exception as e:
             self._log('⚠️ 存本機: %r' % e)
+
+    def _pull_guest_caps(self, pat, tag):
+        # The raw capture is the asset, and until now the cold and sweep rounds
+        # left theirs inside the guest, where a QEMU restart erases them and a
+        # full guest disk silently stops new ones. Only the scan path fetched
+        # anything. Hashes cannot be turned back into a capture; the reverse
+        # always works, so the capture is what has to leave.
+        #
+        # The guest copy is removed after a verified pull. That keeps the next
+        # round from re-fetching the same bytes and keeps /newroot/tmp off the
+        # ENOSPC cliff that once made 5G writes produce zero packets.
+        try:
+            r = subprocess.run(
+                VM_SSH.split() + ['sh', '-c', 'ls %s 2>/dev/null' % pat],
+                capture_output=True, timeout=30)
+            paths = [x.strip() for x in
+                     (r.stdout or b'').decode('utf8', 'replace').split('\n')
+                     if x.strip().endswith(('.pcapng', '.pcapng_1'))]
+            got = 0
+            for p in paths:
+                c = subprocess.run(VM_SSH.split() + ['cat', p],
+                                   capture_output=True, timeout=180)
+                data = c.stdout or b''
+                if len(data) < 100:
+                    continue
+                os.makedirs(CAPSTORE, exist_ok=True)
+                dst = os.path.join(CAPSTORE, '%s-%s-%s' % (
+                    tag, time.strftime('%Y%m%d-%H%M%S'),
+                    os.path.basename(p)))
+                with open(dst, 'wb') as f:
+                    f.write(data)
+                got += 1
+                subprocess.run(VM_SSH.split() + ['rm', '-f', p],
+                               capture_output=True, timeout=30)
+            self._ev('pcap', '%s_pulled=%d of=%d' % (tag, got, len(paths)))
+        except Exception as e:
+            self._ev('pcapfail', '%s %r' % (tag, e))
 
     def _save_pcap(self, rnd, ssid, bssid):
         try:
