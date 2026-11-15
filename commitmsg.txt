@@ -1,42 +1,47 @@
-perf(mac): all radio work first, and the raw capture finally leaves the guest
+fix(mac): stop ripping the card out of the driver mid-probe; diagnose link speed
 
-glm-radio: "hcxpcapngtool + cat 移出關鍵路徑——轉檔不需要卡". Correct, and it
-was being violated three times inside the harvest window. Applied all the way
-through: the cold round now runs every operation that needs a living radio
-back to back (2.4G harvest, 5G harvest, TXRX read, both rcascan verdicts),
-then everything that needs only the guest CPU (both conversions, both cats).
-Radio work ends at 54s of a 95s budget instead of the card idling through
-30s of conversion mid-flight.
+The card has been on the Mac bus all evening. Every "card off bus" reading I
+took today was a false negative from my own probe: this machine prints
+idVendor in decimal (5263), and the pattern I simplified this afternoon
+searched only for the hex form "(0x148f" after dropping the decimal branch
+that used to save it. The app itself was fine -- _card_health uses the
+decimal form and correctly reported the card as present.
 
-Its D recommendation to merge the harvest and the verdict into one
-"--rcascan=active ... -w file" invocation is rejected: hcxdumptool.c refuses
-that pairing and calls exit(EXIT_FAILURE) in both option orders, proven
-against the installed binary in the previous commit. It checked the help
-text and the option semantics in master and 6.3.4, which are all correct, and
-missed the two guards at 6041-6047 and 6233-6245.
+Two real defects behind that noise:
 
-Bigger gap found while wiring this up: _save_pcap only ever fetched scan_*,
-so the cold and sweep rounds left their raw pcapng inside the guest. Only
-hashes came back. A hash cannot be turned back into a capture, and the guest
-filesystem is erased by a QEMU restart -- and had already filled the disk
-once before, which is what made 5G writes return zero packets. The user's
-standing instruction is that the captures must survive off the Mac; nothing
-in the cold path was honouring it.
+1. hotadd_adapter waited a fixed 4 seconds, asked wlan_ok(), got False, and
+   reported a failed hot-add. The guest needs about 16 seconds to load
+   rt2870.bin before wlan0 exists -- the serial log shows phy0 coming up at
+   t=15.6s. So the next cycle issued device_del straight through a probe
+   that was still running, producing "Vendor Request 0x07 failed ... error
+   -19" and "Invalid RT chipset 0x0000, rev 0000 detected". We were
+   generating the very errors we were reading as evidence of a dead card.
+   Now: ask the monitor whether the device is already attached and, if it
+   is, wait instead of yanking; poll for wlan0 up to 45s rather than
+   guessing once at 4s.
 
-New _pull_guest_caps fetches every capture the guest holds after the round,
-writes it to capstore, and removes the guest copy on a verified pull. That
-also keeps /newroot/tmp off the ENOSPC cliff and stops the backup loop from
-re-sending the same bytes each round.
+2. _card_health classified the card via "system_profiler SPUSBDataType |
+   grep -ci 802.11 n". system_profiler returns 0 bytes in 0 seconds with
+   rc=0 on this machine, so the grep always said 0 and every present card
+   was called a zombie and put into a 60s backoff. Switched to ioreg.
 
-Self-inflicted bug caught by the compiler during the reorder: a string
-literal followed by the name CH with no + between them. Implicit
-concatenation only joins two literals, so the block would not parse. This is
-the exact fragility audit-sweep listed as "correct but fragile" last round.
+What is actually wrong right now is not in this commit. The Mac negotiates
+the dongle at Full Speed and QEMU passes it through at 1.5 Mb/s, so the
+guest enumerates nothing at all -- its log shows only the two virtual xhci
+hubs (idVendor 1d6b) and no 148f. Releasing the device from QEMU and
+re-adding it does not change the number, so no software on this path can
+renegotiate it. At 23:11 the same card enumerated high-speed and wlan0 came
+up, which is why this reads as a contact fault rather than a dead chip.
 
-Tests: probe_cold 29/29. test_sweepgen ALL PASS with the invariant restated
-from "each capture is followed by its own convert" to "all radio work
-precedes all conversion", plus guards that the capture is pulled and that the
-guest copy is deleted. test_round ALL PASS.
+Added _link_speed so the app logs the number instead of me having to ask.
+It logs raw rather than thresholding because the high-speed value has not
+been observed on this machine yet.
 
-Field effect still zero: the card has not been on the bus all session.
+Self-inflicted during this change: inserted two 8-space lines directly after
+a 12-space if-block, which is an IndentationError, and the daemon runs that
+file so the app was down until the next deploy. Second indentation slip today
+from the same habit -- splice by line and re-read the block, always.
+
+Deployed: COMPILE OK, daemon pid 30026, web 200. Field effect still zero --
+Device Speed is still 2 and the guest still sees no card.
 Rollback: git revert <this sha>.

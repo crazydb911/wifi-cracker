@@ -595,20 +595,54 @@ class App:
         except Exception:
             return False
 
+    def _qemu_has_card(self):
+        try:
+            r = subprocess.run(
+                ['sh', '-c', 'printf "info usb\\n" | nc -U -w 3 '
+                 + MON_SOCK],
+                capture_output=True, timeout=12)
+            return b'wifiA' in (r.stdout or b'')
+        except Exception:
+            return False
+
+    def _wait_wlan(self, secs=45):
+        # The guest needs about 16 seconds between the device appearing
+        # and wlan0 existing: rt2x00 has to load rt2870.bin first, and
+        # the serial log shows phy0 coming up at t=15.6s. The old code
+        # slept a fixed 4s, called wlan_ok(), got False, reported a
+        # failed hot-add, and the next cycle issued device_del straight
+        # through a probe that was still running. That is where
+        # "Vendor Request 0x07 failed ... error -19" and "Invalid RT
+        # chipset 0x0000" came from -- the app was tearing the card out
+        # of the driver mid-probe and then blaming the card.
+        end = time.time() + secs
+        while time.time() < end:
+            if self.wlan_ok():
+                return True
+            time.sleep(2)
+        return False
+
     def hotadd_adapter(self):
         try:
+            if self._qemu_has_card():
+                # Already passed through. Re-adding would device_del a
+                # device the guest is still probing, so wait it out
+                # instead of yanking it again.
+                self._ev('hotadd', 'already_attached_waiting')
+                ok = self._wait_wlan(45)
+                self._ev('hotadd', 'wlan_ok=%s was_attached=True' % ok)
+                return ok
             subprocess.run(
                 ['sh', '-c',
                  'printf "device_del wifiBoot\\ndevice_del wifiA\\n" | '
                  'nc -U -w 3 ' + MON_SOCK +
                  '; sleep 1; printf "device_add usb-host,bus=xhci.0,'
                  'vendorid=0x' + self._card_ids()[0] + ',productid=0x'
-                     + self._card_ids()[1] + ',id=wifiA\n" | '
+                     + self._card_ids()[1] + ',id=wifiA\\n" | '
                  'nc -U -w 3 ' + MON_SOCK],
                 capture_output=True, timeout=20)
-            time.sleep(4)
-            ok = self.wlan_ok()
-            self._ev('hotadd', 'wlan_ok=%s' % ok)
+            ok = self._wait_wlan(45)
+            self._ev('hotadd', 'wlan_ok=%s was_attached=False' % ok)
             return ok
         except Exception as e:
             self._ev('hotadd', 'err=%r' % e)
@@ -747,6 +781,28 @@ class App:
         return self.vm_ready(timeout=12)
 
     # ================= scan =================
+    def _link_speed(self):
+        # The dongle is a 480 Mbit/s device. When the host only manages
+        # Full or Low speed, QEMU passes it through as 1.5 Mbit/s and
+        # the guest never enumerates it at all: the serial log then
+        # shows only the two virtual xhci hubs (idVendor 1d6b) and no
+        # 148f. That is a contact fault, not a dead card, and it wants
+        # a different answer than "please replug" -- flip the USB-C
+        # plug, push until it clicks, or use the other port. The raw
+        # number is logged rather than compared to a constant because
+        # the high-speed value has not been observed on this machine
+        # yet; once it has, this becomes a threshold.
+        try:
+            r = subprocess.run(
+                ['sh', '-c',
+                 "ioreg -p IOUSB -l -w 0 | tr , " + chr(34) + "\\n" + chr(34)
+                 + " | grep -i " + chr(34) + "Device Speed" + chr(34)
+                 + " | head -1"],
+                capture_output=True, timeout=25).stdout.decode().strip()
+            return r.split('=')[-1].strip() or 'unknown'
+        except Exception:
+            return 'unknown'
+
     def _card_health(self):
         try:
             a = subprocess.run(
@@ -754,14 +810,16 @@ class App:
                  + "'idVendor" + chr(34) + " = " + self._card_ids()[2] + "'"],
                 capture_output=True, timeout=25).stdout.decode().strip()
             b = subprocess.run(
-                ['sh', '-c', "system_profiler SPUSBDataType 2>/dev/null "
-                 "| grep -ci '802.11 n'"],
-                capture_output=True, timeout=90).stdout.decode().strip()
+                ['sh', '-c', "ioreg -p IOUSB -l -w 0 "
+                 "| grep -ci '802.11 n WLAN'"],
+                capture_output=True, timeout=30).stdout.decode().strip()
         except Exception:
             return 'unknown'
         if a == '0':
             return 'absent'
         if b == '0':
+            sp = self._link_speed()
+            self._ev('heal', 'link_speed=%s' % sp)
             return 'zombie'
         return 'ok'
 
