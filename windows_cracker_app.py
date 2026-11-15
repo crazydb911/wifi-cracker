@@ -3,7 +3,7 @@
 Windows WiFi Cracker (port 8766) - hashcat control + receive from Mac.
 Reference workflow: hcxpcapngtool -> hashcat (like hcxdumptool ecosystem)
 """
-import os, sys, json, subprocess, threading, time, re
+import os, sys, json, subprocess, threading, time, re, uuid
 from pathlib import Path
 from datetime import datetime
 from fastapi import FastAPI, UploadFile, File, Request
@@ -27,6 +27,8 @@ WORDLISTS = {
 POTFILE = r"C:\Users\crazydb911\Documents\deepseek\hashes\test_pot"
 UPLOAD_DIR = r"C:\Users\crazydb911\Documents\deepseek\uploads"
 LOG_DIR = r"C:\Users\crazydb911\Documents\deepseek\logs"
+# 待破解佇列的落地檔：Windows 重開後清單不會消失
+QUEUE_FILE = os.path.join(LOG_DIR, "hash_queue.json")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -53,7 +55,184 @@ STATE = {
     "speed": None,
     "cracking": False,
     "attack_info": None,
+    # 待破解清單（取代舊的單槽 STATE["pending"]）
+    "queue": [],
+    "pending": None,
 }
+
+# ---------------- 待破解佇列 ----------------
+# 舊設計：收到的 hash 只放 STATE["pending"] 單槽，新 hash 覆蓋舊 hash，而且
+# receive-hash 路徑從不設定 STATE["hash_file"] → 網頁破解鈕永遠 disabled、
+# /api/crack 空轉、前 19 顆的檔案留在 UPLOAD_DIR 沒有人解。
+# 現在改成清單：每顆收到的 hash 都有一筆、檔名帶 uuid 不會同秒互相覆蓋、
+# 清單本身也落地，Windows 重開不會遺失已收到的 hash。
+def _count_lines(path):
+    try:
+        with open(path, encoding='utf-8', errors='ignore') as f:
+            return sum(1 for l in f if l.strip())
+    except Exception:
+        return 0
+
+
+def queue_save():
+    """Persist the queue so a Windows restart does not orphan received hashes."""
+    try:
+        tmp = QUEUE_FILE + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(STATE["queue"], f, ensure_ascii=False)
+        os.replace(tmp, QUEUE_FILE)
+    except Exception:
+        pass
+
+
+def queue_load():
+    """Restore the queue after restart; 'running' entries become 'pending'."""
+    try:
+        with open(QUEUE_FILE, encoding='utf-8') as f:
+            d = json.load(f)
+        if isinstance(d, list):
+            STATE["queue"] = [e for e in d if isinstance(e, dict)
+                              and e.get("hash_file")
+                              and os.path.exists(e["hash_file"])]
+    except Exception:
+        pass
+    for e in STATE["queue"]:
+        if e.get("state") == "running":
+            e["state"] = "pending"
+    queue_save()
+    sync_pending()
+
+
+def queue_add(hash_file, ssid, bssid, lines, state="pending"):
+    """Add one received hash. The same AP merges into one entry (no re-crack)."""
+    for e in STATE["queue"]:
+        same_ap = (bssid and e.get("bssid") == bssid) or \
+                  (not bssid and ssid and e.get("ssid") == ssid)
+        if same_ap and e.get("state") == "pending":
+            try:
+                with open(hash_file, encoding='utf-8', errors='ignore') as f:
+                    new = [l.strip() for l in f if l.strip()]
+                have = set()
+                if os.path.exists(e["hash_file"]):
+                    with open(e["hash_file"], encoding='utf-8',
+                              errors='ignore') as g:
+                        have = {l.strip() for l in g if l.strip()}
+                with open(e["hash_file"], 'a', encoding='utf-8') as f:
+                    for l in new:
+                        if l not in have:
+                            f.write(l + '\n')
+                            have.add(l)
+            except Exception:
+                pass
+            e["lines"] = _count_lines(e["hash_file"])
+            e["time"] = time.strftime('%H:%M:%S')
+            queue_save()
+            try:
+                os.remove(hash_file)
+            except Exception:
+                pass
+            return e
+    ent = {"id": uuid.uuid4().hex[:8], "hash_file": hash_file, "ssid": ssid,
+           "bssid": bssid, "lines": lines, "time": time.strftime('%H:%M:%S'),
+           "state": state}
+    STATE["queue"].append(ent)
+    queue_save()
+    sync_pending()
+    return ent
+
+
+def queue_find(qid):
+    for e in STATE["queue"]:
+        if e.get("id") == qid:
+            return e
+    return None
+
+
+def queue_take(qid=None):
+    """Pick one entry (by id, else oldest pending) and mark it 'running'."""
+    pick = None
+    for e in STATE["queue"]:
+        if qid:
+            if e.get("id") == qid:
+                pick = e
+                break
+        elif e.get("state") == "pending":
+            pick = e
+            break
+    if pick is None:
+        return None
+    pick["state"] = "running"
+    queue_save()
+    return pick
+
+
+def queue_drop(qid=None, hash_file=None):
+    """Remove a finished/failed entry (the .hc22000 file stays on disk)."""
+    changed = False
+    for e in list(STATE["queue"]):
+        if (qid and e.get("id") == qid) or \
+           (hash_file and e.get("hash_file") == hash_file):
+            STATE["queue"].remove(e)
+            changed = True
+    if changed:
+        queue_save()
+        sync_pending()
+
+
+def sync_pending():
+    """Mirror the oldest pending queue entry into STATE['pending'] (UI compat)."""
+    pend = [e for e in STATE["queue"] if e.get("state") == "pending"]
+    STATE["pending"] = pend[0] if pend else None
+
+
+def start_crack(hash_file, ssid, qid=None, note=""):
+    """Start cracking one hash file. Same hashcat as before — no new VRAM use."""
+    if not hash_file or not os.path.exists(hash_file):
+        log(f"crack skipped, file missing: {hash_file}")
+        return False
+    STATE["hash_file"] = hash_file
+    STATE["ssid"] = ssid
+    STATE["hash_count"] = _count_lines(hash_file)
+    STATE["status"] = "cracking"
+    STATE["cracking"] = True
+    STATE["results"] = []
+    STATE["progress"] = 5
+    STATE["message"] = (f"Cracking {ssid}: {len(STAGES)}-stage ({note})..." if note
+                        else f"Cracking {ssid}: {len(STAGES)}-stage...")
+    if qid:
+        e = queue_find(qid)
+        if e is not None:
+            e["state"] = "running"
+            queue_save()
+    threading.Thread(target=multi_stage_crack, args=(hash_file, ssid, qid),
+                     daemon=True).start()
+    return True
+
+
+def queue_next():
+    """Start the next queued hash when nothing is running and the GPU is idle."""
+    if STATE.get("cracking"):
+        return
+    if gpu_busy():
+        return
+    for e in list(STATE["queue"]):
+        if e.get("state") != "pending":
+            continue
+        if not os.path.exists(e.get("hash_file", "")):
+            queue_drop(qid=e.get("id"))
+            continue
+        start_crack(e["hash_file"], e.get("ssid"), qid=e.get("id"),
+                    note="佇列自動接續")
+        return
+
+
+def queue_next_later(delay=15):
+    """Give the Mac a moment to poll the previous result, then continue."""
+    def _go():
+        time.sleep(delay)
+        queue_next()
+    threading.Thread(target=_go, daemon=True).start()
+
 
 def log(msg):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -76,7 +255,7 @@ def get_gpu_status():
         r = subprocess.run(
             ['nvidia-smi', '--query-gpu=temperature.gpu,utilization.gpu,memory.used',
              '--format=csv,noheader,nounits'],
-            capture_output=True, text=True, timeout=5)
+            capture_output=True, text=True, timeout=5, creationflags=subprocess.CREATE_NO_WINDOW)
         t, u, m = r.stdout.strip().split(',')
         STATE["gpu_temp"] = int(t.strip())
         STATE["gpu_util"] = int(u.strip().replace('%', ''))
@@ -116,7 +295,7 @@ def get_crack_status():
     # Try to read from the last hashcat output we captured
     try:
         # Check if hashcat is still running
-        r = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq hashcat.exe'], capture_output=True, text=True, timeout=5)
+        r = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq hashcat.exe'], capture_output=True, text=True, timeout=5, creationflags=subprocess.CREATE_NO_WINDOW)
         if 'hashcat.exe' not in r.stdout:
             STATE["cracking"] = False
             STATE["status"] = "idle"
@@ -231,17 +410,34 @@ def notify_mac(password):
     except Exception as e:
         log(f"Mac notify error: {e}")
 
-def kill_orphan_hashcat():
-    """Kill leftover hashcat instances so a new one can start (GPU lock)."""
+# 只有本 app 啟動的 hashcat PID。絕不 taskkill /IM（會誤殺別輪正在跑的破解）
+_OWN_HASHCAT_PID = None
+
+
+def kill_own_hashcat():
+    """Kill ONLY the hashcat this app started (by PID).
+
+    舊版 taskkill /F /IM hashcat.exe：Mac 重複送同一組 hash 時，每次 receive
+    都會開新 thread → 新一輪把上一輪正在跑的 hashcat 殺掉重來，前功盡棄。
+    現在只殺自己記錄的 PID，不影響任何其他 hashcat，也不碰使用者的 GPU 程序。
+    """
+    global _OWN_HASHCAT_PID
+    pid = _OWN_HASHCAT_PID
+    _OWN_HASHCAT_PID = None
+    if not pid:
+        return
     try:
-        subprocess.run('taskkill /F /IM hashcat.exe', shell=True,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(['taskkill', '/F', '/PID', str(pid)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       creationflags=subprocess.CREATE_NO_WINDOW)
     except Exception:
         pass
     time.sleep(1)
 
-def crack_hashes(hash_file, wordlist_key, rules_key=None, mode="0", mask=None):
+def crack_hashes(hash_file, wordlist_key, rules_key=None, mode="0", mask=None,
+                 keep_queue=False):
     """Run a single hashcat stage. Returns True if a password was found."""
+    global _OWN_HASHCAT_PID
     STATE["status"] = "cracking"
     STATE["cracking"] = True
     STATE["progress"] = 60
@@ -264,9 +460,10 @@ def crack_hashes(hash_file, wordlist_key, rules_key=None, mode="0", mask=None):
         elif mode in ("1", "mask"):
             cmd.extend(["-a", "3", hash_file, mask or "?d?d?d?d?d?d?d?d"])
         log(f"CMD: {' '.join(cmd)}")
-        kill_orphan_hashcat()
+        kill_own_hashcat()
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, encoding='utf-8', errors='ignore', cwd=HASHCAT_DIR)
+                                text=True, encoding='utf-8', errors='ignore', cwd=HASHCAT_DIR, creationflags=subprocess.CREATE_NO_WINDOW)
+        _OWN_HASHCAT_PID = proc.pid
         start_time = time.time()
         last_log = 0
         speed_lines = []
@@ -297,6 +494,8 @@ def crack_hashes(hash_file, wordlist_key, rules_key=None, mode="0", mask=None):
             if 'Rejected' in line:
                 log(f"REJECTED: {line}")
         proc.wait()
+        if _OWN_HASHCAT_PID == proc.pid:
+            _OWN_HASHCAT_PID = None
         elapsed = int(time.time() - start_time)
         hc_log = os.path.join(LOG_DIR, f"hashcat_{int(start_time)}.log")
         with open(hc_log, 'w', encoding='utf-8') as f:
@@ -320,15 +519,21 @@ def crack_hashes(hash_file, wordlist_key, rules_key=None, mode="0", mask=None):
         if found:
             STATE["status"] = "cracked"
             notify_mac(results[0])
+            if not keep_queue:
+                queue_drop(hash_file=hash_file)
             return True
         else:
             STATE["status"] = "idle"
+            if not keep_queue:
+                queue_drop(hash_file=hash_file)
             return False
     except Exception as e:
         STATE["status"] = "idle"
         STATE["cracking"] = False
         STATE["message"] = f"Crack error: {e}"
         log(f"Crack error: {e}")
+        if not keep_queue:
+            queue_drop(hash_file=hash_file)
         return False
 
 
@@ -367,33 +572,43 @@ def lookup_potfile(ssid_hex):
     return None
 
 
-def multi_stage_crack(hash_file, ssid):
+def multi_stage_crack(hash_file, ssid, qid=None):
     """Run bounded stages (no infinite stage). Returns immediately if potfile has answer."""
     threading.Thread(target=thermal_monitor, daemon=True).start()
     total = len(STAGES)
-    for i, stage in enumerate(STAGES):
-        if STATE["status"] == "cracked":
-            break
-        STATE["status"] = "cracking"
-        STATE["cracking"] = True
-        STATE["progress"] = int((i / total) * 100)
-        STATE["message"] = f"[{i+1}/{total}] {stage['name']}..."
-        log(f"[stage {i+1}/{total}] {stage['name']}")
-        found = crack_hashes(
-            hash_file,
-            stage["wordlist"] or "rockyou",
-            stage["rules"],
-            stage["mode"],
-            stage["mask"]
-        )
-        if found:
-            log(f"🎉 Password found at stage {i+1}: {stage['name']}")
-            break
-    if STATE["status"] != "cracked":
-        STATE["status"] = "done"
-        STATE["message"] = f"All {total} stages exhausted: no match"
-        log(f"All stages done, no match for {ssid}")
-    kill_orphan_hashcat()
+    try:
+        for i, stage in enumerate(STAGES):
+            if STATE["status"] == "cracked":
+                break
+            STATE["status"] = "cracking"
+            STATE["cracking"] = True
+            STATE["progress"] = int((i / total) * 100)
+            STATE["message"] = f"[{i+1}/{total}] {stage['name']}..."
+            log(f"[stage {i+1}/{total}] {stage['name']}")
+            found = crack_hashes(
+                hash_file,
+                stage["wordlist"] or "rockyou",
+                stage["rules"],
+                stage["mode"],
+                stage["mask"],
+                keep_queue=True
+            )
+            if found:
+                log(f"🎉 Password found at stage {i+1}: {stage['name']}")
+                break
+        if STATE["status"] != "cracked":
+            STATE["status"] = "done"
+            STATE["message"] = f"All {total} stages exhausted: no match"
+            log(f"All stages done, no match for {ssid}")
+    finally:
+        kill_own_hashcat()
+        STATE["cracking"] = False
+        if qid:
+            queue_drop(qid=qid)
+        else:
+            queue_drop(hash_file=hash_file)
+        # 這一輪結束 → 還有排隊的 hash 且顯存閒置就接續跑（不新增顯存用量）
+        queue_next_later()
 
 @app.get("/")
 async def root():
@@ -444,8 +659,13 @@ select,input{background:#0f3460;color:#eee;border:none;padding:8px;border-radius
 <select id="rules"><option value="">No rules</option><option value="best66">best66</option><option value="dive">dive</option></select>
 <select id="mode"><option value="0">Straight (-a 0)</option><option value="3">Hybrid (-a 3)</option><option value="mask">Mask (-a 3)</option></select>
 <input type="text" id="mask" placeholder="mask (e.g. ?d?d?d?d?d?d?d?d)" style="width:250px">
-<button onclick="crack()" id="btn-crack" disabled>Crack</button>
+<button onclick="crack()" id="btn-crack">Crack</button>
+<div style="font-size:13px;margin:6px 0">目前目標檔案: <span id="cur-file">--</span></div>
 <div class="results" id="results">No results yet</div>
+</div>
+<div class="card">
+<h2>待破解佇列 (<span id="q-count">0</span>)</h2>
+<div class="results" id="q-list" style="font-size:13px"></div>
 </div>
 <div class="card" id="pending-card" style="display:none;border:2px solid #ff9800">
 <h2>⏸ 收到新 hash — 等待確認</h2>
@@ -471,16 +691,23 @@ tb.style.background=d.gpu_temp>=85?'#ff5252':d.gpu_temp>=75?'#ff9800':'#4fc3f7';
 document.getElementById('hash-count').textContent=d.hash_count||0;
 document.getElementById('ssid').textContent=d.ssid||'--';
 document.getElementById('results').textContent=d.results.length?d.results.join('\\n'):'No results yet';
+document.getElementById('cur-file').textContent=d.hash_file||'--';
 document.getElementById('btn-crack').disabled=!d.hash_file||d.status!=='idle';
+const q=d.queue||[];
+document.getElementById('q-count').textContent=q.length;
+const ql=document.getElementById('q-list');
+ql.innerHTML=q.length?q.map(function(e){return '<div>'+e.state+' | '+(e.ssid||'?')+' | '+(e.lines||0)+' 行 | '+(e.time||'')+' <button class="q-ok" data-id="'+e.id+'">開始破解</button> <button class="q-no" data-id="'+e.id+'">拒絕</button></div>';}).join(''):'（沒有待破解的 hash）';
+ql.querySelectorAll('.q-ok').forEach(function(b){b.onclick=function(){confirmCrack(b.getAttribute('data-id'));};});
+ql.querySelectorAll('.q-no').forEach(function(b){b.onclick=function(){rejectCrack(b.getAttribute('data-id'));};});
 document.getElementById('btn-extract').disabled=d.status!=='idle';
 const pc=document.getElementById('pending-card');
-if(d.status==='pending'&&d.pending){pc.style.display='block';
+if(d.pending){pc.style.display='block';
 const p=d.pending;
 document.getElementById('pending-info').innerHTML='SSID: <b>'+p.ssid+'</b><br>BSSID: '+p.bssid+'<br>hash 行數: '+p.lines+'<br>收到時間: '+p.time+'<br>目前顯存已用: '+(d.gpu_mem_used||'?')+'MB';
 }else{pc.style.display='none'}
 }).catch(e=>console.error(e))}
-function confirmCrack(){fetch('/api/confirm',{method:'POST'}).then(r=>r.json()).then(update)}
-function rejectCrack(){fetch('/api/reject',{method:'POST'}).then(r=>r.json()).then(update)}
+function confirmCrack(id){fetch('/api/confirm'+(id?'?qid='+id:''),{method:'POST'}).then(r=>r.json()).then(update)}
+function rejectCrack(id){fetch('/api/reject'+(id?'?qid='+id:''),{method:'POST'}).then(r=>r.json()).then(update)}
 function extract(){
 const f=document.getElementById('pcap-file').files[0];
 const s=document.getElementById('ssid-input').value||'32H9F_5G';
@@ -552,6 +779,14 @@ async def get_state():
     get_crack_status()
     return JSONResponse(STATE)
 
+
+@app.get("/api/queue")
+async def get_queue():
+    """待破解清單：每個收到的 hash 一筆，不會被後到的 hash 蓋掉。"""
+    return JSONResponse({"ok": True, "count": len(STATE["queue"]),
+                         "queue": STATE["queue"],
+                         "pending": STATE.get("pending")})
+
 @app.post("/api/receive-hash")
 async def api_receive_hash(request: Request):
     """Receive hash from Mac, start multi-stage auto-escalation cracking."""
@@ -573,10 +808,13 @@ async def api_receive_hash(request: Request):
     if ssid_hex:
         ssid_hex = ssid_hex.upper()
     
-    # Save hash to file
-    hash_file = os.path.join(UPLOAD_DIR, f"hash_{int(time.time())}.hc22000")
+    # Save hash to file. uuid in the name so two arrivals inside the same
+    # second can never overwrite each other (old name was hash_<sec>.hc22000).
+    hash_file = os.path.join(
+        UPLOAD_DIR, f"hash_{int(time.time())}_{uuid.uuid4().hex[:8]}.hc22000")
     with open(hash_file, 'w') as f:
         f.write(hash_str + '\n')
+    n_lines = len(hash_str.splitlines())
     
     # Try potfile first (instant answer)
     password = lookup_potfile(ssid_hex)
@@ -587,58 +825,83 @@ async def api_receive_hash(request: Request):
         STATE["progress"] = 100
         STATE["message"] = f"Found in potfile: {password}"
         STATE["attack_info"] = "potfile"
+        STATE["hash_file"] = hash_file
+        STATE["hash_count"] = n_lines
+        STATE["ssid"] = ssid
         log(f"✅ INSTANT: {ssid} = {password} (from potfile)")
-        return JSONResponse({"ok": True, "password": password, "source": "potfile", "ssid": ssid})
+        return JSONResponse({"ok": True, "password": password, "source": "potfile",
+                             "ssid": ssid, "hash_file": hash_file,
+                             "state": STATE["status"]})
     
-    # GPU idle -> crack right away; GPU busy (local model in VRAM) -> hold for confirm
-    if not gpu_busy():
-        STATE["status"] = "cracking"
-        STATE["cracking"] = True
-        STATE["results"] = []
-        STATE["message"] = f"Cracking {ssid}: {len(STAGES)}-stage (顯存閒置自動跑)..."
-        STATE["progress"] = 5
-        threading.Thread(target=multi_stage_crack, args=(hash_file, ssid),
-                         daemon=True).start()
+    # Every received hash joins the queue first — it is never dropped because
+    # another hash arrived later (old design: single STATE["pending"] slot).
+    ent = queue_add(hash_file, ssid, bssid, n_lines, state="pending")
+    STATE["hash_file"] = ent["hash_file"]
+    STATE["hash_count"] = ent.get("lines") or n_lines
+    STATE["ssid"] = ssid
+
+    # GPU idle AND nothing cracking -> start right away.
+    # GPU busy (local model in VRAM) or a crack already running -> hold in queue.
+    if not gpu_busy() and not STATE.get("cracking"):
+        start_crack(ent["hash_file"], ssid, qid=ent["id"], note="顯存閒置自動跑")
         log(f"▶ GPU idle, auto-cracking {ssid}")
         return JSONResponse({"ok": True, "auto": True,
-                             "message": "顯存閒置 → 直接開始破解"})
+                             "message": "顯存閒置 → 直接開始破解",
+                             "hash_file": ent["hash_file"], "id": ent["id"],
+                             "state": STATE["status"],
+                             "queued": len(STATE["queue"])})
 
     STATE["status"] = "pending"
-    STATE["cracking"] = False
-    STATE["results"] = []
     STATE["progress"] = 0
-    STATE["message"] = ("收到 %s 的 hash（%d 行, BSSID %s）— 顯存被佔用 %sMB，等待確認是否破解"
-                        % (ssid, len(hash_str.splitlines()), bssid or '?',
-                           STATE.get("gpu_mem_used", '?')))
-    STATE["pending"] = {"hash_file": hash_file, "ssid": ssid, "bssid": bssid,
-                        "lines": len(hash_str.splitlines()),
-                        "time": time.strftime('%H:%M:%S')}
-    log(f"⏸ Hash held for confirmation: {ssid}")
+    if gpu_busy():
+        why = "顯存被佔用 %sMB" % STATE.get("gpu_mem_used", '?')
+    elif STATE.get("cracking"):
+        why = "已有破解在跑"
+    else:
+        why = "等待確認"
+    STATE["message"] = ("收到 %s 的 hash（%d 行, BSSID %s）— %s，等待確認是否破解"
+                        % (ssid, n_lines, bssid or '?', why))
+    sync_pending()
+    log(f"⏸ Hash held for confirmation: {ssid} ({n_lines} lines, queued={len(STATE['queue'])})")
     return JSONResponse({"ok": True, "pending": True,
-                         "message": "hash 已儲存，等待確認破解"})
+                         "message": "hash 已儲存，等待確認破解",
+                         "hash_file": ent["hash_file"], "id": ent["id"],
+                         "state": STATE["status"],
+                         "queued": len(STATE["queue"])})
 
 @app.post("/api/confirm")
-async def api_confirm():
-    p = STATE.get("pending")
-    if not p:
-        return JSONResponse({"ok": False, "error": "Nothing pending"})
-    STATE["pending"] = None
-    STATE["status"] = "cracking"
-    STATE["cracking"] = True
-    STATE["results"] = []
-    STATE["message"] = f"Cracking {p['ssid']}: {len(STAGES)}-stage (confirmed)..."
-    STATE["progress"] = 5
-    threading.Thread(target=multi_stage_crack, args=(p["hash_file"], p["ssid"]),
-                     daemon=True).start()
-    log(f"▶ User confirmed, cracking {p['ssid']}")
-    return JSONResponse({"ok": True, "message": "cracking started"})
+async def api_confirm(qid: str = None):
+    """Start cracking one queued hash (qid optional → oldest pending)."""
+    ent = queue_take(qid)
+    if ent is None:
+        return JSONResponse({"ok": False, "error": "Nothing pending",
+                             "queued": len(STATE["queue"])})
+    sync_pending()
+    if not os.path.exists(ent.get("hash_file", "")):
+        queue_drop(qid=ent.get("id"))
+        return JSONResponse({"ok": False, "error": "Hash file missing"})
+    start_crack(ent["hash_file"], ent.get("ssid"), qid=ent.get("id"), note="confirmed")
+    log(f"▶ User confirmed, cracking {ent.get('ssid')}")
+    return JSONResponse({"ok": True, "message": "cracking started",
+                         "hash_file": ent.get("hash_file"), "id": ent.get("id"),
+                         "queued": len(STATE["queue"])})
 
 @app.post("/api/reject")
-async def api_reject():
-    STATE["pending"] = None
-    STATE["status"] = "idle"
+async def api_reject(qid: str = None):
+    """Drop one queued hash (the .hc22000 file stays on disk for Mac to resend)."""
+    ent = None
+    for e in list(STATE["queue"]):
+        if (qid and e.get("id") == qid) or (not qid and e.get("state") == "pending"):
+            ent = e
+            break
+    if ent is not None:
+        queue_drop(qid=ent.get("id"))
+    sync_pending()
+    if not STATE.get("cracking"):
+        STATE["status"] = "idle"
     STATE["message"] = "已拒絕破解（hash 已存檔，Mac 可重送）"
-    return JSONResponse({"ok": True})
+    log(f"✕ rejected: {(ent or {}).get('ssid', '-')}")
+    return JSONResponse({"ok": True, "queued": len(STATE["queue"])})
 
 @app.post("/api/extract")
 async def api_extract(file: UploadFile = File(...), ssid: str = "32H9F_5G"):
@@ -651,19 +914,48 @@ async def api_extract(file: UploadFile = File(...), ssid: str = "32H9F_5G"):
     return JSONResponse({"ok": True, "path": pcap_path})
 
 @app.post("/api/crack")
-async def api_crack(wordlist: str = "rockyou", rules: str = None, mode: str = "0", mask: str = None, temp_limit: int = 85):
+async def api_crack(wordlist: str = "rockyou", rules: str = None, mode: str = "0", mask: str = None, temp_limit: int = 85, qid: str = None):
     global TEMP_LIMIT
     if temp_limit:
         TEMP_LIMIT = temp_limit
-    if STATE["hash_file"]:
-        threading.Thread(target=thermal_monitor, daemon=True).start()
-        threading.Thread(target=crack_hashes, args=(STATE["hash_file"], wordlist, rules, mode, mask), daemon=True).start()
-    return JSONResponse({"ok": True})
+    hf = None
+    if qid:
+        ent = queue_find(qid)
+        if ent:
+            hf = ent.get("hash_file")
+    if not hf:
+        hf = STATE.get("hash_file")
+    if not hf or not os.path.exists(hf):
+        return JSONResponse({"ok": False, "error": "No hash file"})
+    if STATE.get("cracking"):
+        return JSONResponse({"ok": False, "error": "Crack already running"})
+    if not qid:
+        for e in list(STATE["queue"]):
+            if e.get("hash_file") == hf:
+                qid = e.get("id")
+                break
+    if qid:
+        queue_take(qid)
+    STATE["hash_file"] = hf
+    STATE["status"] = "cracking"
+    STATE["cracking"] = True
+    STATE["results"] = []
+    STATE["progress"] = 60
+    threading.Thread(target=thermal_monitor, daemon=True).start()
+    threading.Thread(target=crack_hashes, args=(hf, wordlist, rules, mode, mask), daemon=True).start()
+    return JSONResponse({"ok": True, "hash_file": hf})
 
 @app.post("/api/stop")
 async def api_stop():
-    """Stop current cracking."""
-    r = subprocess.run(['taskkill', '/F', '/IM', 'hashcat.exe'], capture_output=True, text=True)
+    """Stop current cracking.
+
+    刻意保留 taskkill /F /IM hashcat.exe（不是漏網地雷）：這條路徑只有使用者
+    手動按網頁「Stop」才會走，語意就是「把現在所有 hashcat 停下來」，所以會
+    連同佇列中其他條目的 hashcat 一起殺掉。
+    自動流程（每個破解階段、每輪佇列接續）一律走 kill_own_hashcat()，
+    只殺自己追蹤的 PID，不會誤殺別輪正在跑的破解。
+    """
+    r = subprocess.run(['taskkill', '/F', '/IM', 'hashcat.exe'], capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
     STATE["cracking"] = False
     STATE["status"] = "idle"
     STATE["message"] = "Stopped"
@@ -726,9 +1018,11 @@ def crack_hashes_custom(hash_file, wordlist_path, rules_key, mode, mask):
         elif mode in ("3", "1", "mask"):
             cmd.extend(["-a", "3", hash_file, wordlist_path, mask or "?d?d?d?d?d?d?d?d"])
         log(f"CMD: {' '.join(cmd)}")
-        kill_orphan_hashcat()
+        kill_own_hashcat()
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, encoding='utf-8', errors='ignore', cwd=HASHCAT_DIR)
+                                text=True, encoding='utf-8', errors='ignore', cwd=HASHCAT_DIR, creationflags=subprocess.CREATE_NO_WINDOW)
+        global _OWN_HASHCAT_PID
+        _OWN_HASHCAT_PID = proc.pid
         start_time = time.time()
         last_log = 0
         for line in proc.stdout:
@@ -780,5 +1074,6 @@ if __name__ == "__main__":
     finally:
         _probe.close()
     log("Windows WiFi Cracker starting on port 8766...")
+    queue_load()
     get_gpu_status()
     uvicorn.run(app, host="0.0.0.0", port=8766)
