@@ -1,6 +1,9 @@
 # WiFi破解台 交接檔
 
-最後更新：Mac 時鐘 Nov 11 ~22:50／commit `9bbbf62b`（已推 origin/main）
+最後更新：Mac 時鐘 Nov 15 17:56／commit `197715f1`（已推 origin/main）
+
+> **Mac LAN IP 已從 `192.168.1.111` 改成 `192.168.1.117`（DHCP 續約）。** 連不上時先重查 ARP，別誤判成離線。
+> SSH：`ssh -i C:/Users/crazydb911/.ssh/opremote_ed25519 tongbao@192.168.1.117`（落地 zsh）。跨三層引號用 base64 送腳本：`"echo <b64> | base64 -d | zsh"`。
 
 ## 硬性指令（違反即錯）
 - 用中文回覆，不寫沒解釋的英文。
@@ -15,7 +18,7 @@
 | 角色 | 位址 |
 |---|---|
 | Windows 破解端（本機） | LAN 192.168.1.107 / Tailscale 100.94.10.122，cracker :8766，hashcat `C:\tools\hashcat-7.1.2`，排程任務 `WiFiCracker` |
-| Mac（女友筆電，app 以 root 跑 LaunchDaemon `com.wifi.cracker`） | 曾用 LAN 192.168.1.111、Tailscale 100.64.239.76（macbook-air-8） |
+| Mac（女友筆電 M2，`tongbaodeMacBook-Air`，app 以 root 跑 LaunchDaemon `com.wifi.cracker`） | **LAN 192.168.1.117**（原 .111）、Tailscale 100.64.239.76 `m2-tongbao`（常 offline） |
 | 本地模型 omlx | 192.168.1.44:18083 |
 | cliproxy 閘道 | 192.168.1.115:8318 |
 
@@ -44,7 +47,7 @@ Mac app = QEMU aarch64 VM（Alpine 3.24 / kernel 6.18.52-0-lts）+ D-Link DWA-16
 - 更早：`18f64b83` preheat 首輪 80s→56s、txpower 每輪最多一次；`1594d410` txpower `-95` 靜默失敗可見化（`TXPOWFAIL`）。
 
 ## 下一步（依優先序）
-1. **A5**：`--bpf=/tmp/t.bpf`（`_round` 抓包行）是否 hcxdumptool 7.1.2 合法選項。隊友認為只有 `--bpfr=`／`--bpfw=`；不合法則 hcxdumptool 立即退出 → `_cap_streak` 達 3 → 每 3 輪重啟 QEMU。**不需要網卡**：`hcxdumptool --help` 不吃無線裝置，可手動開一個無卡 QEMU 驗證（QEMU 常數在 `mac_wifi_app_v2.py` L15-33，`_start_vm` L626-673），驗完立刻 kill 讓 app 收回 qcow2。指令：`chroot /newroot hcxdumptool --help 2>&1 | grep -i bpf`。
+1. ~~**A5**~~ **已結案，隊友判斷錯誤（Nov 15 實測，見下方「A5 結案」）。** 下一件事改成：**C9**（`_preheat` 重置路徑不全）與 **C2**（掃描吞掉 tcpdump stderr、不查 returncode）。
 2. **C9**：`_preheat` 只在 `vm_down`／`NOWLAN` 路徑重置；另外三條 VM 重建路徑留 `True`，讓新 PHY 跳過預熱。
 3. **C2/C3/C6**：掃描丟掉 tcpdump stderr 且不查 `returncode`；hcxpcapngtool 失敗被當 `vm_down`；`len(data) < 100` 把 `cat` 失敗和真空抓包混為一談。
 4. **A4/A7/A8/A10、C4/C7/C8/C10**：見下方未修清單。
@@ -66,6 +69,43 @@ Mac app = QEMU aarch64 VM（Alpine 3.24 / kernel 6.18.52-0-lts）+ D-Link DWA-16
 - `ee387edd`／`18f64b83`／`1594d410`／`9bbbf62b` **從未對活著的網卡跑過**。
 - 每輪 hash 產量 vs 基準未量測（`new=0` 每個週期）。
 - 卡 wedge 後「重開 QEMU + 驅動重探」能否恢復封包流——被實體拔插擋住。
+
+## A5 結案：hcxdumptool 旗標全數驗證（Nov 15，**不需要網卡**）
+
+用**無卡 QEMU**（7 秒上線）在 guest 內逐旗標比對。**方法關鍵**：hcxdumptool 先查介面、後查選項，所以 `-i wlan0`（無卡時不存在）會讓所有測試都回 `failed to get interface index`，看不出差別——**必須拿存在的 `eth0` 當對照組**才會抵達選項驗證。
+
+| 旗標 | 結果 |
+|---|---|
+| `-c 6a` / `-c 36b` | accepted |
+| `-w` / `-t` / `--rds=2` | accepted |
+| `--rcascan=active` | accepted |
+| **`--bpf=/tmp/t.bpf`** | **accepted（app 用法正確）** |
+| `--m2max=16` | accepted |
+| **`--bpfr=`（隊友建議改的）** | **REJECTED — 7.1.2 沒這個選項** |
+| `hcxpcapngtool --all -o` | accepted |
+| 對照組 `--zzzz=1` | `unrecognized option`（證明測試有效） |
+
+BPF 管線端到端也測了：`tcpdump -y IEEE802_11 -dd "wlan addr1 … or type mgt subtype probereq"` → 814 bytes 正確位元組碼（`0x4ca0` = coverage log 那台 4ca0e3 的 OUI）→ hcxdumptool 收得下去。
+
+**教訓**：隊友的 A5 若照改會把能動的選項弄壞。分身的發現一律要自己設計對照組重測。
+
+### 無卡 QEMU 探測法（可重用，已驗證）
+app 在 `no_card_on_bus_skip_qemu` 狀態下不會起 QEMU，所以 qcow2 沒人用，可手動開一台探測機。**不要帶 `usb-host` 裝置**（無卡時會拖死啟動），這樣在裡面 insmod 也不傷 usb-host。
+```
+sudo nohup /opt/homebrew/bin/qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 1024 -smp 2 \
+  -drive file=/Users/tongbao/vmbuild/alpine-root.qcow2,format=qcow2 \
+  -kernel /Users/tongbao/vmbuild/alpine-boot/boot/vmlinuz-lts \
+  -initrd /Users/tongbao/vmbuild/vmbuild/runner-initrd \
+  -append "console=ttyAMA0 cfg80211.ieee80211_regdom=TW" \
+  -chardev file,id=s0,path=/tmp/probe_serial.log,append=on -serial chardev:s0 \
+  -netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-10.0.2.15:22 \
+  -device virtio-net-pci,netdev=n0 -device qemu-xhci,id=xhci \
+  -display none -monitor unix:/tmp/probe_monitor.sock,server,nowait \
+  > /tmp/probe_qemu.err 2>&1 &
+```
+進 guest：`ssh -i /Users/tongbao/.ssh/vm_tongbao -p 2222 -o StrictHostKeyChecking=no root@127.0.0.1`（落地 initramfs shell，`/newroot` 已掛，所以一律 `chroot /newroot`）。
+用完 `sudo pkill -f probe_monitor.sock`；驗完 app 照常 `no_card_on_bus_skip_qemu`，無副作用。
+**限制**：guest 無 `mac80211_hwsim`（`find /lib/modules -name '*hwsim*'` 空），所以**無法**在無卡情況下建 monitor 介面 → 完整抓包管線實測仍需實體卡。
 
 ## 操作備忘
 - 重啟 app：`sudo launchctl kickstart -k system/com.wifi.cracker`（`bootstrap` 會失敗：Bootstrap failed: 5）。
