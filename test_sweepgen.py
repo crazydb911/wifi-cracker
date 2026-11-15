@@ -79,26 +79,33 @@ chk('txpower written at most twice per round', s1.count('set txpower') <= 2)
 # list natively -- its help reads "-c <digit> : set channel (1a,2a,36b,...)
 # default: 1a,6a,11a" -- so one process hops internally and pays the
 # interface mode init once per band instead of once per channel.
-chk('cold round goes active on both bands', s1.count('hcxdumptool -i wlan0') == 3,
+chk('cold round goes active on both bands', s1.count('hcxdumptool -i wlan0') == 4,
     '(got %d)' % s1.count('hcxdumptool -i wlan0'))
 chk('cold round issues no tcpdump', 'tcpdump -i wlan0' not in s1)
 chk('cold round hops with channel lists',
     '-c 1a,6a,11a' in s1 and '-c 36b,40b,44b,48b' in s1)
 chk('cold round puts the injection question to the tool itself',
     s1.count('--rcascan=active') == 2, '(got %d)' % s1.count('--rcascan=active'))
-chk('harvest stops on the first PMKID', s1.count('--exitoneapol=1') == 1)
-chk('errormax raised off the default 100', s1.count('--errormax=100000') == 3,
+chk('harvest stops on the first PMKID', s1.count('--exitoneapol=1') == 2,
+    '(got %d)' % s1.count('--exitoneapol=1'))
+chk('errormax raised off the default 100', s1.count('--errormax=100000') == 4,
     '(got %d)' % s1.count('--errormax=100000'))
 chk('cold round does not re-tune per channel', 'iw dev wlan0 set channel' not in s1)
+# TXRX1 sits after the two harvests, not after the rcascan verdicts: the
+# counters measure what the captures saw, and a verdict run adds no packets
+# to the asset.
 chk('tx/rx counters bracket the captures',
     s1.find('TXRX0 ') >= 0 and s1.find('TXRX1 ') > max(
-        i for i in range(len(s1)) if s1.startswith('hcxdumptool', i)))
+        s1.index('-w /tmp/cold1.pcapng'), s1.index('-w /tmp/cold2.pcapng')))
+chk('both harvests land before either verdict',
+    max(s1.index('-w /tmp/cold1.pcapng'), s1.index('-w /tmp/cold2.pcapng'))
+    < s1.index('echo RCASCAN24_START'))
 chk('stale 149/153 suppressed', '149b' not in s1 and '153b' not in s1)
 chk('txpower written at most once per session (ping-pong off)', s1.count('set txpower') <= 1,
     '(got %d)' % s1.count('set txpower'))
 chk('rejected 5G back-off write removed', 'set txpower fixed 1000' not in s1)
 chk('converters wrapped in timeout so a hang cannot eat the ssh budget',
-    s1.count('timeout 20 hcxpcapngtool') == 3, '(got %d)' % s1.count('timeout 20 hcxpcapngtool'))
+    s1.count('timeout 20 hcxpcapngtool') == 2, '(got %d)' % s1.count('timeout 20 hcxpcapngtool'))
 
 print('=== steady round (map-driven) ===')
 s2, t2 = ns['gen'](T(dict(oldmap), True))
@@ -128,17 +135,33 @@ chk('txpower re-armed for a fresh session then not repeated',
     s2.count('set txpower') <= 1, '(got %d)' % s2.count('set txpower'))
 
 print('=== per-phase flush (card dies ~45s after enumeration) ===')
-pos = sorted(set(i for i in range(len(s1)) if s1.startswith('hcxdumptool', i)))
-chk('cold round issues %d captures' % len(pos), len(pos) == 3, '(got %d)' % len(pos))
+inv = []
+for i in range(len(s1)):
+    if s1.startswith('hcxdumptool', i):
+        j = s1.find('\n', i)
+        inv.append(s1[i:j if j > 0 else len(s1)])
+# hcxdumptool.c calls exit(EXIT_FAILURE) when --rcascan and -w appear
+# together, in either order (proven against the installed binary). A phase
+# that paired them captured nothing, and the round would have reported a
+# dead radio when the real cause was the tool's own argument check.
+chk('no invocation pairs --rcascan with -w',
+    not any('--rcascan' in x and ' -w ' in x for x in inv),
+    str([x[:60] for x in inv if '--rcascan' in x and ' -w ' in x]))
+chk('verdict runs carry --rds=5, harvest runs --rds=4',
+    all('--rds=5' in x for x in inv if '--rcascan' in x)
+    and all('--rds=4' in x for x in inv if ' -w ' in x))
+pos = sorted(set(i for i in range(len(s1)) if s1.startswith('hcxdumptool', i)
+                 and ' -w ' in (lambda j: s1[i:j if j > 0 else len(s1)])(s1.find('\n', i))))
+chk('cold round issues %d captures' % len(pos), len(pos) == 2, '(got %d)' % len(pos))
 gaps = []
 for a, b in zip(pos, pos[1:] + [len(s1)]):
     if 'hcxpcapngtool' not in s1[a:b]:
         gaps.append(a)
 chk('every capture is followed by its own convert', not gaps, str(gaps))
 chk('each phase writes a distinct pcapng',
-      all(('-w /tmp/cold%d.pcapng ' % k) in s1 for k in (1, 2, 3)))
+      all(('-w /tmp/cold%d.pcapng ' % k) in s1 for k in (1, 2)))
 chk('each convert cats its hashes back through ssh',
-      s1.count('cat /tmp/cold') == 3, '(got %d)' % s1.count('cat /tmp/cold'))
+      s1.count('cat /tmp/cold') == 2, '(got %d)' % s1.count('cat /tmp/cold'))
 first_flush = s1.find('hcxpcapngtool')
 chk('first flush lands before the 5G phase',
       0 < first_flush < s1.find('-c 36b,40b,44b,48b'),

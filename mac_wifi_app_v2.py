@@ -1506,10 +1506,15 @@ class App:
             # pays the interface-mode init once instead of once per channel,
             # which is the promiscuous churn the log ties to the wedge.
             #
-            # --rcascan=active is the tool's own injection test; its help
-            # defines the reading for us: "no PROBERESPONSE, AP is out of
-            # RANGE, packet injection is broken". That is the question this
-            # app has been circling for days via BEACON counts.
+            # --rcascan=active is the tool's own injection test, but it is a
+            # separate mode: hcxdumptool.c refuses --rcascan together with -w
+            # and calls exit(EXIT_FAILURE) in both option orders. The previous
+            # version of this block paired them, so both active phases died on
+            # the spot having captured nothing, and the reporting below would
+            # have blamed the radio for the tool's own argument check. Harvest
+            # and verdict are therefore separate runs, harvest first: a PMKID
+            # already proves transmit works, so the verdict is only needed to
+            # tell a dead radio apart from an empty room.
             #
             # --errormax defaults to 100 and a half-dead transmit path floods
             # errors, so hcxdumptool was quitting itself mid-capture. Raised.
@@ -1518,35 +1523,37 @@ class App:
             # continuing is what loses everything.
             script += ('rm -f /tmp/cold*.pcapng* 2>/dev/null\n'
                        'TXRX0 %s\n' % TXR +
-                       'timeout 30 ' + CH + 'hcxdumptool -i wlan0 '
-                       '-c 1a,6a,11a --rcascan=active --rds=4 --rdt '
+                       'timeout 25 ' + CH + 'hcxdumptool -i wlan0 '
+                       '-c 1a,6a,11a --rds=4 --rdt --exitoneapol=1 '
                        '--errormax=100000 -t 4 -w /tmp/cold1.pcapng '
-                       '2>&1 | tail -45\n'
+                       '2>&1 | tail -20\n'
                        'echo COLD24_DONE\n' +
                        CH + 'timeout 20 hcxpcapngtool --all -o /g/tmp/cold1.22000 '
                        '/tmp/cold1.pcapng* 2>/dev/null\n' +
                        CH + 'cat /tmp/cold1.22000 2>/dev/null\n' +
-                       'timeout 25 ' + CH + 'hcxdumptool -i wlan0 '
-                       '-c 1a,6a,11a --rds=2 --rdt --exitoneapol=1 '
-                       '--errormax=100000 -t 5 -w /tmp/cold2.pcapng '
-                       '2>&1 | tail -20\n' +
-                       'echo COLDHARVEST_DONE\n' +
+                       'timeout 22 ' + CH + 'hcxdumptool -i wlan0 '
+                       '-c 36b,40b,44b,48b --rds=4 --rdt --exitoneapol=1 '
+                       '--errormax=100000 -t 4 -w /tmp/cold2.pcapng '
+                       '2>&1 | tail -20\n'
+                       'echo COLD5G_DONE\n'
+                       'TXRX1 %s\n' % TXR +
                        CH + 'timeout 20 hcxpcapngtool --all -o /g/tmp/cold2.22000 '
                        '/tmp/cold2.pcapng* 2>/dev/null\n' +
                        CH + 'cat /tmp/cold2.22000 2>/dev/null\n' +
-                       'timeout 25 ' + CH + 'hcxdumptool -i wlan0 '
-                       '-c 36b,40b,44b,48b --rcascan=active --rds=4 --rdt '
-                       '--errormax=100000 -t 4 -w /tmp/cold3.pcapng '
-                       '2>&1 | tail -45\n' +
-                       'echo COLD5G_DONE\n'
-                       'TXRX1 %s\n' % TXR +
-                       CH + 'timeout 20 hcxpcapngtool --all -o /g/tmp/cold3.22000 '
-                       '/tmp/cold3.pcapng* 2>/dev/null\n' +
-                       CH + 'cat /tmp/cold3.22000 2>/dev/null\n' +
+                       'echo RCASCAN24_START\n'
+                       'timeout 18 ' + CH + 'hcxdumptool -i wlan0 '
+                       '-c 1a,6a,11a --rcascan=active --rds=5 --rdt '
+                       '--errormax=100000 -t 3 2>&1 | tail -30\n'
+                       'echo RCASCAN24_DONE\n'
+                       'echo RCASCAN5G_START\n'
+                       'timeout 15 ' + CH + 'hcxdumptool -i wlan0 '
+                       '-c 36b,40b,44b,48b --rcascan=active --rds=5 --rdt '
+                       '--errormax=100000 -t 3 2>&1 | tail -30\n'
+                       'echo RCASCAN5G_DONE\n'
                        'echo COLDSCAN_DONE\n')
-            total += 145
-            self._ev('cold', 'active-first 1a,6a,11a + 36b-48b rcascan '
-                             'exitoneapol=1 errormax=100000')
+            total += 130
+            self._ev('cold', 'harvest-first 1a,6a,11a + 36b-48b then '
+                             'rcascan=active --rds=5 exitoneapol=1')
             # Empty the per-channel maps rather than returning early: the
             # single execution point lives below both loops, and returning
             # here would build a script and never run it.
@@ -1647,16 +1654,38 @@ class App:
         # rcascan's help defines the reading: no PROBERESPONSE means injection
         # is broken. Saying which of the two happened, in the round it
         # happened, is the difference between a measurement and a hope.
-        if 'COLD24_DONE' in out or 'COLD5G_DONE' in out:
-            pr = out.count('PROBERESPONSE') + out.count(' PROBEREQUEST')
-            self._ev('cold', 'phases=%d/%d proberesp=%d'
-                     % (out.count('COLD24_DONE') + out.count('COLDHARVEST_DONE')
-                        + out.count('COLD5G_DONE') + out.count('COLDSCAN_DONE'),
-                        4, pr))
-            if 'COLD24_DONE' in out and pr == 0:
-                self._ev('cold', 'INJECTION_DEAD per rcascan definition')
-                self._log('⚠️ 主動掃描收到 0 個 PROBERESPONSE — '
-                          '注入路徑已死（hcxdumptool 官方定義）')
+        if 'COLD24_DONE' in out or 'RCASCAN24_DONE' in out:
+            def _seg(a, b):
+                i = out.find(a)
+                j = out.find(b)
+                return out[i:j] if 0 <= i < j else ''
+            # hcxdumptool prints the PROBERESPONSE line only when its count is
+            # above zero, so a missing line IS the verdict. BEACON present and
+            # PROBERESPONSE absent is precisely a card that receives but
+            # cannot transmit -- which is what the guest log has been saying.
+            def _verdict(seg):
+                if not seg:
+                    return 'not_run'
+                if 'PROBERESPONSE(s) received' in seg:
+                    return 'alive'
+                if 'BEACON(s) received' in seg:
+                    return 'rx_only'
+                return 'silent'
+            v24 = _verdict(_seg('RCASCAN24_START', 'RCASCAN24_DONE'))
+            v5 = _verdict(_seg('RCASCAN5G_START', 'RCASCAN5G_DONE'))
+            self._ev('cold', 'harvest24=%s harvest5g=%s rca24=%s rca5g=%s'
+                     % ('COLD24_DONE' in out, 'COLD5G_DONE' in out, v24, v5))
+            for nm, v in (('2.4G', v24), ('5G', v5)):
+                if v == 'rx_only':
+                    self._ev('cold', 'INJECTION_DEAD %s beacon_yes_proberesp_no' % nm)
+                    self._log('⚠️ %s 收到 BEACON 但 0 個 PROBERESPONSE — '
+                              '收得到、發不出去' % nm)
+                elif v == 'alive':
+                    self._ev('cold', 'INJECTION_ALIVE %s' % nm)
+                    self._log('✅ %s 主動掃描收到 PROBERESPONSE — 注入可用' % nm)
+                elif v == 'silent':
+                    self._ev('cold', 'RCA_SILENT %s' % nm)
+                    self._log('⚠️ %s 主動掃描連 BEACON 都沒收到 — 可能已過世' % nm)
         done_ch = out.count('SWEEPCH')
         if done_ch < n_ch:
             # how long the card actually lived, in channels it finished.

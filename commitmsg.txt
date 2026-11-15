@@ -1,23 +1,35 @@
-add capture backup loop: raw pcapng finally leaves the Mac
+fix cold round: --rcascan and -w cannot coexist, hcxdumptool exits
 
-Nothing in this app ever moved a capture off the machine. _sync_loop and
-_backfill_upload both carry hashes only, so 54 MB of pcapng lived solely on
-a borrowed M2 with a return date. Raw capture is the asset: a hash can be
-re-extracted from a pcap, never the other way round.
+hcxdumptool.c refuses --rcascan together with -w and calls exit(EXIT_FAILURE)
+in both option orders. The cold round paired them on its two active phases,
+so both died on the spot having captured nothing, and the reporting below
+would have logged INJECTION_DEAD -- blaming the radio for the tool's own
+argument check. That false verdict could have sent us chasing a hardware
+fault on the one insertion we are allowed.
 
-One tarball per batch rather than one scp per file, because a tarball lands
-whole or not at all, so the timestamp marker can only advance across data
-that is provably complete. capstore and hashstore travel together, which is
-what keeps an old capture re-crackable later. Offline is the normal state at
-the field site, so a failed push logs one deferred line and stays quiet.
+Proven against the installed binary, not just the source: both orders print
+"combination of --rcascan and -w is not allowed" and exit 1, while the two
+replacement phases fail only on "failed to get interface index" (no card on
+the bus), which means every option in them parses.
 
-Verified live: first run pushed 842 files / 2417984 bytes in 1.1s and the
-tarball landed in D:/wifi_captures/m2/incremental; second run pushed
-nothing (0.0s, no event); after adding one file the run reported
-pushed=1 bytes=150 and the matching tarball arrived. Daemon pid 83254
-started after the file mtime, so the loop is live, not merely on disk.
+Harvest and verdict are now separate runs, harvest first on both bands:
+a PMKID already proves transmit works, so the verdict only has to tell a
+dead radio apart from an empty room. Verdicts use --rcascan=active --rds=5
+(APs of all channels sorted by PROBERESPONSE). Reporting reads the tool's
+own exit summary, where the PROBERESPONSE line is printed only when its
+count is above zero, so a missing line is the verdict; BEACON present with
+PROBERESPONSE absent is exactly a card that receives but cannot transmit.
 
-Also verified separately: the existing 54 MB archive is now on Windows and
-on the NAS under the same sha256 b157496a1f6815de27e73f64bc4da75c7221741d
-6da1883a93173e3f5005fc08, extraction tested (848 files, 58086280 bytes,
-170 pcapng, 670 .22000, 1 .pot).
+Also corrected two claims in earlier notes: the 5.0s cadence in the guest
+log is the printk ratelimit window (DEFAULT_RATELIMIT_INTERVAL=5*HZ, burst
+10; 475s/5s=95 windows, (95+1)x10=960 lines, matching the log exactly),
+not a driver retry period -- real retry rate is about 18/s. And -71 is a
+transaction error, not a Stall, so CLEAR_HALT would not have helped; the
+TX status read is an EP0 control vendor request, so the failure is a device
+that answers bulk-in but not vendor reads.
+
+Tests: probe_cold rewritten to the new contract, 29/29 including a guard
+that no invocation pairs the two options. test_sweepgen ALL PASS on the
+Mac. test_round ALL PASS.
+
+Field effect still zero: the card has not been on the bus all session.
