@@ -1372,15 +1372,10 @@ class App:
             # 23 dBm ceiling, which is the USB brownout suspect.
             self._ev('txpower', '5G back-off rejected; PHY at max')
 
-        if 'NOWLAN' in out:
-            self._ev('sweep', 'wlan_missing_skip')
-            self._preheat = False
-            time.sleep(15)
-            return 0
-        done_ch = out.count('SWEEPCH')
-        if done_ch < n_ch:
-            # how long the card actually lived, in channels it finished.
-            self._ev('sweep', 'partial %d/%d ch flushed' % (done_ch, n_ch))
+        # Harvest before any early return. A card that dies mid-script has
+        # already flushed its per-channel hashes into stdout; returning at
+        # NOWLAN first threw exactly those away, which is the same loss the
+        # per-channel flush was added to prevent.
         lines = [l.strip() for l in out.splitlines() if l.startswith('WPA*')]
         pth = os.path.join(HASHSTORE, 'sweep_all.22000')
         seen = set()
@@ -1396,7 +1391,19 @@ class App:
                 f.write('\n'.join(new) + '\n')
             self.hash_pool.update(new)
             self._enqueue_sweep_hits(new)
-        self._ev('sweep', 'cycle ch=%d new=%d' % (len(chans), len(new)))
+        done_ch = out.count('SWEEPCH')
+        if done_ch < n_ch:
+            # how long the card actually lived, in channels it finished.
+            self._ev('sweep', 'partial %d/%d ch flushed' % (done_ch, n_ch))
+        # raw separates "captured nothing" from "captured only duplicates",
+        # which new alone cannot tell apart.
+        self._ev('sweep', 'cycle ch=%d raw=%d new=%d'
+                 % (len(chans), len(lines), len(new)))
+        if 'NOWLAN' in out:
+            self._ev('sweep', 'wlan_missing_skip')
+            self._preheat = False
+            time.sleep(15)
+            return 0
         self._preheat = True
         return len(new)
 
