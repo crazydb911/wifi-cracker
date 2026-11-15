@@ -1314,22 +1314,30 @@ class App:
         if self.target or self._running.is_set():
             return 0
         total = 0
+        n_ch = len(chans) + len(ch5)
         for i, (c, w) in enumerate(sorted(chans.items(),
                                           key=lambda kv: -kv[1])):
-            dwell = 5 if pre else min(45, 8 + 3 * w)
-            total += dwell + (3 if pre else 6)
+            dwell = 4 if pre else min(45, 8 + 3 * w)
+            total += dwell + (2 if pre else 6)
             script += ('timeout %d ' % (dwell + 4) +
                        CH + 'hcxdumptool -i wlan0 -c %da '
                             '-w /tmp/sw_%d.pcapng -t %d --rds=2 '
                             '2>/dev/null\n' % (c, i, dwell))
+            # Flush per channel. Field-measured Nov 15: the card enumerates,
+            # binds rt2800usb, and dies ~40s later. A round that converts only
+            # at the end therefore delivers ZERO hashes on a dying card.
+            script += (CH + 'hcxpcapngtool --all -o /tmp/sw_%d.22000 '
+                          '/tmp/sw_%d.pcapng* 2>/dev/null\n' % (i, i) +
+                       CH + 'cat /tmp/sw_%d.22000 2>/dev/null\n' % i +
+                       'echo SWEEPCH %d\n' % c)
         if any(c in (36, 40, 44, 48) for c in ch5):
             # one PHY re-tune per round instead of one per channel: the
             # 3000<->1000 ping-pong is register churn we do not need.
             script += (CH + 'iw dev wlan0 set txpower fixed 1000 2>&1'
                        ' | grep -q . && echo TXPOWFAIL\n')
         for j, (c, w) in enumerate(ch5.items()):
-            dwell5 = 5 if pre else min(30, 12 + 2 * w)
-            total += dwell5 + (3 if pre else 5)
+            dwell5 = 3 if pre else min(30, 12 + 2 * w)
+            total += dwell5 + (2 if pre else 5)
             if c in (36, 40, 44, 48):
                 script += ('timeout %d ' % (dwell5 + 4) + CH +
                            'hcxdumptool -i wlan0 -c %db '
@@ -1341,9 +1349,10 @@ class App:
                            'timeout %d ' % (dwell5 + 3) + CH +
                            'tcpdump -i wlan0 -s 0 -w /tmp/sw5_%d.pcap '
                            '2>/dev/null\n' % j)
-        script += (CH + 'hcxpcapngtool --all -o /tmp/sw.22000 '
-                   '/tmp/sw_*.pcapng* /tmp/sw5_*.pcap* 2>/dev/null\n' +
-                   CH + 'cat /tmp/sw.22000 2>/dev/null\n')
+            script += (CH + 'hcxpcapngtool --all -o /tmp/sw5_%d.22000 '
+                          '/tmp/sw5_%d.pcap* 2>/dev/null\n' % (j, j) +
+                       CH + 'cat /tmp/sw5_%d.22000 2>/dev/null\n' % j +
+                       'echo SWEEPCH %d\n' % c)
         try:
             with self._cap_lock:
                 r = subprocess.run(VM_SSH.split() + ['sh', '-s'],
@@ -1368,6 +1377,10 @@ class App:
             self._preheat = False
             time.sleep(15)
             return 0
+        done_ch = out.count('SWEEPCH')
+        if done_ch < n_ch:
+            # how long the card actually lived, in channels it finished.
+            self._ev('sweep', 'partial %d/%d ch flushed' % (done_ch, n_ch))
         lines = [l.strip() for l in out.splitlines() if l.startswith('WPA*')]
         pth = os.path.join(HASHSTORE, 'sweep_all.22000')
         seen = set()

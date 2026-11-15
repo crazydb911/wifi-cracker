@@ -90,6 +90,35 @@ chk('map channels restored (149 passive tcpdump)',
       'tcpdump -i wlan0' in s2 and 'set channel 149' in s2)
 chk('steady round longer than preheat round', t2 > t1, '(%ds vs %ds)' % (t2, t1))
 
+print('=== per-channel flush (card dies ~40s after enumeration) ===')
+CAP = ('hcxdumptool -i wlan0', 'tcpdump -i wlan0')
+pos = sorted([s1.find(k) for k in CAP for _ in [0]
+              if s1.find(k) >= 0] +
+             [i for i in range(len(s1))
+              if s1.startswith(CAP, i)])
+pos = sorted(set(pos))
+chk('preheat round issues %d captures' % len(pos), len(pos) == 7, '(got %d)' % len(pos))
+gaps = []
+for a, b in zip(pos, pos[1:] + [len(s1)]):
+    seg = s1[a:b]
+    if 'hcxpcapngtool' not in seg or 'cat /tmp/sw' not in seg:
+        gaps.append(a)
+chk('every capture is followed by its own convert+cat', not gaps, str(gaps))
+chk('per-channel marker emitted once per capture',
+      s1.count('echo SWEEPCH') == len(pos),
+      '(%d vs %d)' % (s1.count('echo SWEEPCH'), len(pos)))
+first_flush = s1.find('hcxpcapngtool')
+chk('first flush happens early in the script',
+      first_flush > 0 and first_flush < len(s1) // 3,
+      '(offset %d of %d)' % (first_flush, len(s1)))
+chk('end-only bulk convert is gone',
+      '/tmp/sw.22000' not in s1 and '/tmp/sw_*.pcapng*' not in s1)
+chk('preheat budget fits inside measured 40s card life',
+      t1 <= 40, '(got %ds)' % t1)
+chk('steady round also flushes per channel',
+      s2.count('echo SWEEPCH') == len([i for i in range(len(s2))
+                                       if s2.startswith(CAP, i)]))
+
 print('=== static: interface reset is opt-in only ===')
 chk('IF_RESET default is opt-in file', "IF_RESET = os.path.exists" in src)
 chk('ifreset.on gate present', 'ifreset.on' in src)
