@@ -50,6 +50,19 @@ APS_SEEN  = os.path.expanduser('~/wifi_cracker/aps_seen.json')
 CARD_IDS  = os.path.expanduser('~/wifi_cracker/card_ids.txt')
 REACH_SEEN = os.path.expanduser('~/wifi_cracker/reach_seen.json')
 TS_IP     = '100.94.10.122'  # Windows cracker on Tailscale (外出備援)
+
+# Raw capture is the asset: a hash can be re-extracted from a pcap, never the
+# other way round. Nothing else in this app moves a capture off the Mac --
+# _sync_loop and _backfill_upload both carry hashes only -- so until this
+# existed, 54 MB of pcapng lived solely on a borrowed M2 with a return date.
+# The field site has no network at all, so being unable to push is the normal
+# state, not a fault, and must stay quiet.
+CAP_BASE       = os.path.expanduser('~/wifi_cracker')
+CAP_BACKUP_KEY = os.path.expanduser('~/.ssh/capbackup_ed25519')
+CAP_BACKUP_HOST = 'crazydb911@192.168.1.107'
+CAP_BACKUP_DIR = 'D:/wifi_captures/m2/incremental'
+CAP_BACKUP_TS  = os.path.expanduser('~/wifi_cracker/.cap_push_ts')
+CAP_BACKUP_EVERY = 300
 WEB_PORT  = 8765             # Mac 遠端儀表板 (手機/任何裝置可看)
 UQUEUE    = os.path.expanduser('~/wifi_cracker/upload_queue.json')
 APP_LOCK  = '/tmp/mac_wifi_app.lock'
@@ -122,6 +135,7 @@ class App:
             threading.Thread(target=self._scan_loop, daemon=True).start()
             threading.Thread(target=self._watchdog_loop, daemon=True).start()
             threading.Thread(target=self._sync_loop, daemon=True).start()
+            threading.Thread(target=self._cap_backup_loop, daemon=True).start()
             threading.Thread(target=self._web_loop, daemon=True).start()
             threading.Thread(target=self._rca_loop, daemon=True).start()
             self._log('就緒。自動掃描中 — 在左邊選一台 Wi-Fi 就會自動開始。')
@@ -2097,6 +2111,69 @@ IFR +
         except Exception:
             pass
         return out
+
+    def _cap_backup_loop(self):
+        while not self._stop.is_set():
+            for _ in range(CAP_BACKUP_EVERY):
+                if self._stop.is_set():
+                    return
+                time.sleep(1)
+            self._cap_backup_once()
+
+    def _cap_backup_once(self):
+        # One tarball per batch, not one scp per file: a tarball either lands
+        # whole or does not land, so the timestamp marker can only ever
+        # advance across data that is provably complete. Pushing capstore and
+        # hashstore together keeps the hashes next to the captures they came
+        # from, which is what makes an old capture re-crackable later.
+        try:
+            if not os.path.isdir(CAP_BASE):
+                return
+            since = 0.0
+            try:
+                since = os.path.getmtime(CAP_BACKUP_TS)
+            except OSError:
+                pass
+            fresh = []
+            for sub in ('capstore', 'hashstore'):
+                d = os.path.join(CAP_BASE, sub)
+                for root, _dirs, files in os.walk(d):
+                    for fn in files:
+                        p = os.path.join(root, fn)
+                        try:
+                            if os.path.getmtime(p) > since:
+                                fresh.append(os.path.relpath(p, CAP_BASE))
+                        except OSError:
+                            pass
+            if not fresh:
+                return
+            arc = '/tmp/cappush-%s.tar.gz' % time.strftime('%Y%m%d-%H%M%S')
+            subprocess.run(['tar', 'czf', arc, '-C', CAP_BASE] + fresh,
+                           capture_output=True, timeout=180)
+            if not os.path.exists(arc):
+                self._ev('capbackup', 'tar_failed fresh=%d' % len(fresh))
+                return
+            r = subprocess.run(
+                ['scp', '-i', CAP_BACKUP_KEY, '-o', 'ConnectTimeout=15',
+                 '-o', 'StrictHostKeyChecking=no', '-o', 'BatchMode=yes',
+                 arc, '%s:%s/' % (CAP_BACKUP_HOST, CAP_BACKUP_DIR)],
+                capture_output=True, timeout=900)
+            if r.returncode != 0:
+                # Silent by design: at the 靈骨塔 this fails every five
+                # minutes and that is correct, not a fault.
+                self._ev('capbackup', 'deferred rc=%d fresh=%d'
+                         % (r.returncode, len(fresh)))
+                return
+            with open(CAP_BACKUP_TS, 'w') as f:
+                f.write(time.strftime('%Y-%m-%d %H:%M:%S'))
+            self._ev('capbackup', 'pushed=%d bytes=%d'
+                     % (len(fresh), os.path.getsize(arc)))
+            try:
+                os.remove(arc)
+            except OSError:
+                pass
+        except Exception as e:
+            self._ev('capbackup', 'err=%r' % e)
 
     def _sync_loop(self):
         self._backfill_upload()

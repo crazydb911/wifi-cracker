@@ -1,21 +1,23 @@
-cold round goes active-first: rcascan injection test, channel lists, per-phase flush
+add capture backup loop: raw pcapng finally leaves the Mac
 
-Transmit dies (TX status FIFO -EPROTO every 5.0s) while reception keeps
-working, so a passive preheat spent the only healthy window proving nothing
-about the one thing that was broken. hcxdumptool takes channel lists
-natively (help: "-c <digit> : set channel (1a,2a,36b,...) default: 1a,6a,11a"),
-so one process per band hops internally and pays the interface mode init
-once instead of once per channel.
+Nothing in this app ever moved a capture off the machine. _sync_loop and
+_backfill_upload both carry hashes only, so 54 MB of pcapng lived solely on
+a borrowed M2 with a return date. Raw capture is the asset: a hash can be
+re-extracted from a pcap, never the other way round.
 
---rcascan=active is the tool own injection test: its help defines "no
-PROBERESPONSE" as broken packet injection, which is the question this app
-circled for days through BEACON counts. --exitoneapol=1 stops the harvest
-the instant a PMKID lands. --errormax was left at the default 100, which a
-half-dead transmit path floods, so hcxdumptool quit itself mid-capture.
+One tarball per batch rather than one scp per file, because a tarball lands
+whole or not at all, so the timestamp marker can only advance across data
+that is provably complete. capstore and hashstore travel together, which is
+what keeps an old capture re-crackable later. Offline is the normal state at
+the field site, so a failed push logs one deferred line and stays quiet.
 
-Each phase converts and cats on its own so a card dying during the 5G
-phase still delivers the 2.4G hashes. hcxpcapngtool is pure CPU and never
-touches the USB card, so per-phase conversion costs the card nothing.
+Verified live: first run pushed 842 files / 2417984 bytes in 1.1s and the
+tarball landed in D:/wifi_captures/m2/incremental; second run pushed
+nothing (0.0s, no event); after adding one file the run reported
+pushed=1 bytes=150 and the matching tarball arrived. Daemon pid 83254
+started after the file mtime, so the loop is live, not merely on disk.
 
-Verified: probe_cold 23/23, test_sweepgen ALL PASS, test_round ALL PASS.
-Field effect still unobserved: the card has been off the bus throughout.
+Also verified separately: the existing 54 MB archive is now on Windows and
+on the NAS under the same sha256 b157496a1f6815de27e73f64bc4da75c7221741d
+6da1883a93173e3f5005fc08, extraction tested (848 files, 58086280 bytes,
+170 pcapng, 670 .22000, 1 .pot).
