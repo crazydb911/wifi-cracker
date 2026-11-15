@@ -1822,16 +1822,34 @@ IFR +
         except Exception as e:
             self._ev('pcapfail', '%r' % e)
 
+    # Field-mission retention. The old 300 MB ceiling was sized for a
+    # machine that only ever ran validation sweeps. The real mission is a
+    # one-shot field trip (靈骨塔): there is no second chance to re-capture,
+    # and a raw pcapng can always be re-converted to hashes later, while the
+    # reverse is impossible. So the raw capture is the asset and it must not
+    # be eaten mid-session. 8 GB on a volume with 332 GB free is ~40,000
+    # captures at the observed ~200 KB each - more than a day of sweeping.
+    CAPSTORE_CAP = 8 * 1024 * 1024 * 1024
+
     def _rotate_capstore(self):
         try:
             files = sorted(glob.glob(CAPSTORE + '/*.pcapng'),
                            key=os.path.getmtime)
             total = sum(os.path.getsize(x) for x in files)
+            dropped = 0
             for x in files:
-                if total <= 300 * 1024 * 1024:
+                if total <= self.CAPSTORE_CAP:
                     break
                 total -= os.path.getsize(x)
-                os.remove(x)
+                try:
+                    os.remove(x)
+                    dropped += 1
+                except OSError:
+                    pass
+            if dropped:
+                # Deleting the mission's own evidence should never be silent.
+                self._ev('pcap', 'rotated_drop=%d remain=%d' % (
+                    dropped, len(files) - dropped))
         except Exception:
             pass
 
