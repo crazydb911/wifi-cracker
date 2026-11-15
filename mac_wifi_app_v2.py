@@ -2045,7 +2045,9 @@ IFR +
             self._ev('lan', 'err=%r home=False' % e)
             return False
 
-    def _api_try(self, wip, port, path, data=None, timeout=12):
+    def _api_try(self, wip, port, path, data=None, timeout=None):
+        if timeout is None:
+            timeout = self.API_TIMEOUT
         # 外出端點故障轉移: 上次可用 → 家用IP → Tailscale IP
         eps = []
         good = getattr(self, '_good_ep', None)
@@ -2068,18 +2070,34 @@ IFR +
                     body = urllib.request.urlopen(req, timeout=timeout).read()
                 self._good_ep = ep
                 self._api_ok_ts = time.time()
+                self._api_fails = 0
                 return body.decode('utf-8', 'replace'), ep
             except Exception as e:
                 last = e
         raise last
 
+    # A LAN HTTP answer arrives in well under a second, so 12 s per endpoint
+    # was never about correctness - and at the 靈骨塔 there is no network at
+    # all, so _api_try walks all three endpoints and can burn 3 x 12 = 36 s
+    # on a request that could never succeed. The capture card's measured life
+    # is 45 s. That means one doomed upload could spend most of a card's life
+    # waiting on a dead socket, every single round. Fail fast, then stop
+    # paying the toll for a while and let the card spend its life capturing.
+    API_TIMEOUT = 4
+    API_FAIL_LIMIT = 2
+    API_COOLDOWN = 300
+
     def _post(self, hashes, ssid, bssid, wip, port):
+        cool = getattr(self, '_api_cool', 0)
+        if cool > time.time():
+            self._ev('post', 'skip_offline_cooldown=%.0fs' % (cool - time.time()))
+            return False, None
         payload = json.dumps({'hash': '\n'.join(hashes), 'ssid': ssid,
                               'bssid': bssid.lower()}).encode()
         t0 = time.time()
         try:
             body, ep = self._api_try(wip, port, '/api/receive-hash',
-                                     data=payload, timeout=12)
+                                     data=payload)
             if ep != wip:
                 self._log('   Windows 改走 %s' % ep)
             self._log('   上傳成功: %s' % body[:140])
@@ -2098,6 +2116,14 @@ IFR +
         except Exception as e:
             self._log('   上傳失敗: %s' % e)
             self._ev('postfail', 'dur=%.1fs err=%r' % (time.time() - t0, e))
+            f = getattr(self, '_api_fails', 0) + 1
+            self._api_fails = f
+            if f >= self.API_FAIL_LIMIT:
+                self._api_cool = time.time() + self.API_COOLDOWN
+                self._api_fails = 0
+                self._ev('post', 'offline_cooldown=%ds' % self.API_COOLDOWN)
+                self._log('⚠️ 連不到 Windows，%d 秒內不再試上傳（專心抓包）'
+                          % self.API_COOLDOWN)
             return False, None
 
     def _wait_result(self, wip, port, timeout=900):
