@@ -35,7 +35,7 @@ r = s._sweep_round()
 sc = CAP[0] if CAP else ""
 print("rc=%s len=%d" % (r, len(sc)))
 hc = [i for i in range(len(sc)) if sc.startswith("hcxdumptool", i)]
-cv = [i for i in range(len(sc)) if sc.startswith("timeout 20 hcxpcapngtool", i)]
+cv = [i for i in range(len(sc)) if sc.startswith("timeout 15 hcxpcapngtool", i)]
 tx0 = sc.find("TXRX0 "); tx1 = sc.find("TXRX1 ")
 ok = []
 # E0 is the regression guard for a real bug: hcxdumptool.c calls

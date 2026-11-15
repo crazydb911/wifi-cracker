@@ -1523,35 +1523,35 @@ class App:
             # continuing is what loses everything.
             script += ('rm -f /tmp/cold*.pcapng* 2>/dev/null\n'
                        'TXRX0 %s\n' % TXR +
-                       'timeout 25 ' + CH + 'hcxdumptool -i wlan0 '
+                       'timeout 18 ' + CH + 'hcxdumptool -i wlan0 '
                        '-c 1a,6a,11a --rds=4 --rdt --exitoneapol=1 '
                        '--errormax=100000 -t 4 -w /tmp/cold1.pcapng '
                        '2>&1 | tail -20\n'
                        'echo COLD24_DONE\n' +
-                       CH + 'timeout 20 hcxpcapngtool --all -o /g/tmp/cold1.22000 '
+                       CH + 'timeout 15 hcxpcapngtool --all -o /tmp/cold1.22000 '
                        '/tmp/cold1.pcapng* 2>/dev/null\n' +
                        CH + 'cat /tmp/cold1.22000 2>/dev/null\n' +
-                       'timeout 22 ' + CH + 'hcxdumptool -i wlan0 '
+                       'timeout 16 ' + CH + 'hcxdumptool -i wlan0 '
                        '-c 36b,40b,44b,48b --rds=4 --rdt --exitoneapol=1 '
                        '--errormax=100000 -t 4 -w /tmp/cold2.pcapng '
                        '2>&1 | tail -20\n'
                        'echo COLD5G_DONE\n'
                        'TXRX1 %s\n' % TXR +
-                       CH + 'timeout 20 hcxpcapngtool --all -o /g/tmp/cold2.22000 '
+                       CH + 'timeout 15 hcxpcapngtool --all -o /tmp/cold2.22000 '
                        '/tmp/cold2.pcapng* 2>/dev/null\n' +
                        CH + 'cat /tmp/cold2.22000 2>/dev/null\n' +
                        'echo RCASCAN24_START\n'
-                       'timeout 18 ' + CH + 'hcxdumptool -i wlan0 '
+                       'timeout 10 ' + CH + 'hcxdumptool -i wlan0 '
                        '-c 1a,6a,11a --rcascan=active --rds=5 --rdt '
                        '--errormax=100000 -t 3 2>&1 | tail -30\n'
                        'echo RCASCAN24_DONE\n'
                        'echo RCASCAN5G_START\n'
-                       'timeout 15 ' + CH + 'hcxdumptool -i wlan0 '
+                       'timeout 10 ' + CH + 'hcxdumptool -i wlan0 '
                        '-c 36b,40b,44b,48b --rcascan=active --rds=5 --rdt '
                        '--errormax=100000 -t 3 2>&1 | tail -30\n'
                        'echo RCASCAN5G_DONE\n'
                        'echo COLDSCAN_DONE\n')
-            total += 130
+            total += 95
             self._ev('cold', 'harvest-first 1a,6a,11a + 36b-48b then '
                              'rcascan=active --rds=5 exitoneapol=1')
             # Empty the per-channel maps rather than returning early: the
@@ -1559,7 +1559,10 @@ class App:
             # here would build a script and never run it.
             chans = {}
             ch5 = {}
-            n_ch = 0
+            # Four phases, not zero: this is the only place that measures how
+            # long the card lived, and zero would switch that reading off
+            # exactly when it matters most.
+            n_ch = 4
         for i, (c, w) in enumerate(sorted(chans.items(),
                                           key=lambda kv: -kv[1])):
             dwell = 4 if pre else min(45, 8 + 3 * w)
@@ -1585,15 +1588,16 @@ class App:
             # Flush per channel. Field-measured Nov 15: the card enumerates,
             # binds rt2800usb, and dies ~40s later. A round that converts only
             # at the end therefore delivers ZERO hashes on a dying card.
-            script += (CH + 'timeout 20 hcxpcapngtool --all -o /g/tmp/sw_%d.22000 '
+            script += (CH + 'timeout 20 hcxpcapngtool --all -o /tmp/sw_%d.22000 '
                           '/tmp/sw_%d.pcapng* 2>/dev/null\n' % (i, i) +
                        CH + 'cat /tmp/sw_%d.22000 2>/dev/null\n' % i +
                        'echo SWEEPCH %d\n' % c)
-        if any(c in (36, 40, 44, 48) for c in ch5) and False:
-            # Disabled: this is the write the field reports as TXPOWFAIL. instead of one per channel: the
-            # 3000<->1000 ping-pong is register churn we do not need.
-            script += (CH + 'iw dev wlan0 set txpower fixed 1000 2>&1'
-                       ' | grep -q . && echo TXPOWFAIL\n')
+        # No txpower write here on purpose. It was guarded by "and False", which
+        # made it dead while the comment above it read as if it still ran, so a
+        # reader would hunt for a TXPOWFAIL that can never be emitted. The
+        # cold round already arms txpower once per session; repeating it per
+        # channel is register churn on a card whose transmit path is the thing
+        # we are trying to keep alive.
         for j, (c, w) in enumerate(ch5.items()):
             dwell5 = 3 if pre else min(30, 12 + 2 * w)
             total += dwell5 + (2 if pre else 5)
@@ -1608,7 +1612,7 @@ class App:
                            'timeout %d ' % (dwell5 + 3) + CH +
                            'tcpdump -i wlan0 -s 0 -w /tmp/sw5_%d.pcap '
                            '2>/dev/null\n' % j)
-            script += (CH + 'timeout 20 hcxpcapngtool --all -o /g/tmp/sw5_%d.22000 '
+            script += (CH + 'timeout 20 hcxpcapngtool --all -o /tmp/sw5_%d.22000 '
                           '/tmp/sw5_%d.pcap* 2>/dev/null\n' % (j, j) +
                        CH + 'cat /tmp/sw5_%d.22000 2>/dev/null\n' % j +
                        'echo SWEEPCH %d\n' % c)
@@ -1686,7 +1690,9 @@ class App:
                 elif v == 'silent':
                     self._ev('cold', 'RCA_SILENT %s' % nm)
                     self._log('⚠️ %s 主動掃描連 BEACON 都沒收到 — 可能已過世' % nm)
-        done_ch = out.count('SWEEPCH')
+        done_ch = out.count('SWEEPCH') or sum(
+            out.count(m) for m in ('COLD24_DONE', 'COLD5G_DONE',
+                                   'RCASCAN24_DONE', 'RCASCAN5G_DONE'))
         if done_ch < n_ch:
             # how long the card actually lived, in channels it finished.
             self._ev('sweep', 'partial %d/%d ch flushed' % (done_ch, n_ch))
@@ -1775,7 +1781,7 @@ IFR +
                   CH + 'iw dev wlan0 set channel %s 2>/dev/null\nsleep 3\n' % ch +
                   capcmd +
                   'echo "===CONVERT==="\n' +
-                  CH + 'timeout 20 hcxpcapngtool --all -o /g/tmp/scan_%d.22000 /tmp/scan_%d '
+                  CH + 'timeout 20 hcxpcapngtool --all -o /tmp/scan_%d.22000 /tmp/scan_%d '
                        '2>&1 | tail -4\n' % (rnd, rnd) +
                   'echo "===HASH==="\n' +
                   CH + 'cat /tmp/scan_%d.22000 2>/dev/null\n' % rnd +
@@ -2045,19 +2051,31 @@ IFR +
                            key=os.path.getmtime)
             total = sum(os.path.getsize(x) for x in files)
             dropped = 0
+            hold = 0
+            mark = 0.0
+            try:
+                mark = os.path.getmtime(CAP_BACKUP_TS)
+            except OSError:
+                pass
             for x in files:
                 if total <= self.CAPSTORE_CAP:
                     break
+                # A capture the backup loop has not pushed yet is not surplus.
+                # Deleting it would drop the only copy that exists off this Mac,
+                # which is the one thing this rotation must never do.
+                if mark and os.path.getmtime(x) > mark:
+                    hold += 1
+                    continue
                 total -= os.path.getsize(x)
                 try:
                     os.remove(x)
                     dropped += 1
                 except OSError:
                     pass
-            if dropped:
+            if dropped or hold:
                 # Deleting the mission's own evidence should never be silent.
-                self._ev('pcap', 'rotated_drop=%d remain=%d' % (
-                    dropped, len(files) - dropped))
+                self._ev('pcap', 'rotated_drop=%d remain=%d unpushed_hold=%d' % (
+                    dropped, len(files) - dropped, hold))
         except Exception:
             pass
 
@@ -2163,11 +2181,20 @@ IFR +
                 since = os.path.getmtime(CAP_BACKUP_TS)
             except OSError:
                 pass
+            # cutoff is taken before the walk, not after the push. Anything the
+            # capture thread writes while tar and scp are in flight is therefore
+            # still newer than the marker next round and gets re-sent. Marking
+            # with the completion clock instead would swallow every file that
+            # changed during the window, which on a live capture is the normal
+            # case rather than the exception.
+            cutoff = time.time()
             fresh = []
+            seen = 0
             for sub in ('capstore', 'hashstore'):
                 d = os.path.join(CAP_BASE, sub)
                 for root, _dirs, files in os.walk(d):
                     for fn in files:
+                        seen += 1
                         p = os.path.join(root, fn)
                         try:
                             if os.path.getmtime(p) > since:
@@ -2175,12 +2202,25 @@ IFR +
                         except OSError:
                             pass
             if not fresh:
+                if not seen:
+                    # Nothing new and nothing readable look identical from the
+                    # outside. Say so, or a permissions problem reads as a
+                    # quiet afternoon.
+                    self._ev('capbackup', 'walk_empty dirs_unreadable')
                 return
             arc = '/tmp/cappush-%s.tar.gz' % time.strftime('%Y%m%d-%H%M%S')
-            subprocess.run(['tar', 'czf', arc, '-C', CAP_BASE] + fresh,
-                           capture_output=True, timeout=180)
-            if not os.path.exists(arc):
-                self._ev('capbackup', 'tar_failed fresh=%d' % len(fresh))
+            t = subprocess.run(['tar', 'czf', arc, '-C', CAP_BASE] + fresh,
+                               capture_output=True, timeout=180)
+            # tar exits 1 on "file changed as we read it" and still leaves a
+            # usable-looking archive behind, so existence alone is not a pass.
+            if (t.returncode != 0 or not os.path.exists(arc)
+                    or os.path.getsize(arc) == 0):
+                self._ev('capbackup', 'tar_failed rc=%d fresh=%d'
+                         % (t.returncode, len(fresh)))
+                try:
+                    os.remove(arc)
+                except OSError:
+                    pass
                 return
             r = subprocess.run(
                 ['scp', '-i', CAP_BACKUP_KEY, '-o', 'ConnectTimeout=15',
@@ -2193,8 +2233,8 @@ IFR +
                 self._ev('capbackup', 'deferred rc=%d fresh=%d'
                          % (r.returncode, len(fresh)))
                 return
-            with open(CAP_BACKUP_TS, 'w') as f:
-                f.write(time.strftime('%Y-%m-%d %H:%M:%S'))
+            open(CAP_BACKUP_TS, 'a').close()
+            os.utime(CAP_BACKUP_TS, (cutoff, cutoff))
             self._ev('capbackup', 'pushed=%d bytes=%d'
                      % (len(fresh), os.path.getsize(arc)))
             try:

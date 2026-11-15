@@ -1,35 +1,46 @@
-fix cold round: --rcascan and -w cannot coexist, hcxdumptool exits
+fix(mac): conversions wrote /g/tmp, app read /tmp -- every path yielded 0 hashes
 
-hcxdumptool.c refuses --rcascan together with -w and calls exit(EXIT_FAILURE)
-in both option orders. The cold round paired them on its two active phases,
-so both died on the spot having captured nothing, and the reporting below
-would have logged INJECTION_DEAD -- blaming the radio for the tool's own
-argument check. That false verdict could have sent us chasing a hardware
-fault on the one insertion we are allowed.
+audit-sweep found it and the guest confirmed it. Five conversion sites ran
+"hcxpcapngtool --all -o /g/tmp/X.22000" while the very next line cat-ed
+/tmp/X.22000. Nothing in the tree ever created /g -- no mkdir, no symlink in
+any .sh, .py or .md; the VM build scripts only set up /newroot. Proven live:
+  ls: /g: No such file or directory
+  sh: can't create /g/tmp/probe_g.22000: nonexistent directory
+The converter's error went to a swallowed stderr, so the app asked for a file
+that had never been written and got nothing, silently, on every path: cold,
+sweep and scan alike. hashstore agrees -- newest .22000 is Oct 25, zero files
+newer than Nov 01, while the app has been capturing all month.
 
-Proven against the installed binary, not just the source: both orders print
-"combination of --rcascan and -w is not allowed" and exit 1, while the two
-replacement phases fail only on "failed to get interface index" (no card on
-the bus), which means every option in them parses.
+git log -S traces it to 962255df, which changed the -o path and left the
+paired cat alone; 9596a4bc then copied the broken pattern into the cold block.
+This is why the card being off the bus was not the only thing standing between
+us and a hash: even a perfect capture would have produced none.
 
-Harvest and verdict are now separate runs, harvest first on both bands:
-a PMKID already proves transmit works, so the verdict only has to tell a
-dead radio apart from an empty room. Verdicts use --rcascan=active --rds=5
-(APs of all channels sorted by PROBERESPONSE). Reporting reads the tool's
-own exit summary, where the PROBERESPONSE line is printed only when its
-count is above zero, so a missing line is the verdict; BEACON present with
-PROBERESPONSE absent is exactly a card that receives but cannot transmit.
+Also from the same review:
+- cap backup marker now carries the pre-walk cutoff, not the completion clock.
+  Files the capture thread touches during the up-to-900s push window were
+  permanently skipped by the next "mtime > since" test. Re-sending a few
+  duplicates is cheap; losing the only copy off this Mac is not.
+- tar returncode and archive size now checked. tar exits 1 on "file changed
+  as we read it" and still leaves a plausible archive, which was being pushed
+  and then marked as delivered. Failed archives are removed instead of kept.
+- _rotate_capstore no longer deletes a capture newer than the backup marker.
+  Rotation under the 8GB cap could drop an unpushed pcap before the 300s loop
+  ever ran; it now holds it and reports unpushed_hold=N.
+- A walk that finds no files at all now says walk_empty dirs_unreadable, so a
+  permissions problem stops looking like a quiet afternoon.
+- n_ch on the cold path is 4, not 0, and done_ch counts the four phase
+  markers. Zero switched off the "partial N/M ch flushed" reading exactly on
+  the one path that measures how long the card lived.
+- Cold round re-timed to 84s of work (18+15+16+15+10+10, budget 95) so both
+  harvests and both verdicts fit inside the measured 45s card life as far as
+  the card-dependent part can; the first flush still lands at 18s.
+- Removed the txpower block guarded by "and False" whose comment claimed it
+  still ran, so nobody hunts for a TXPOWFAIL that cannot be emitted.
 
-Also corrected two claims in earlier notes: the 5.0s cadence in the guest
-log is the printk ratelimit window (DEFAULT_RATELIMIT_INTERVAL=5*HZ, burst
-10; 475s/5s=95 windows, (95+1)x10=960 lines, matching the log exactly),
-not a driver retry period -- real retry rate is about 18/s. And -71 is a
-transaction error, not a Stall, so CLEAR_HALT would not have helped; the
-TX status read is an EP0 control vendor request, so the failure is a device
-that answers bulk-in but not vendor reads.
-
-Tests: probe_cold rewritten to the new contract, 29/29 including a guard
-that no invocation pairs the two options. test_sweepgen ALL PASS on the
-Mac. test_round ALL PASS.
+Tests: new guard asserts every converter -o path is also cat-ed and that no
+path leans on a directory nothing creates. test_sweepgen, test_round and
+probe_cold (29/29) all pass. py_compile clean.
 
 Field effect still zero: the card has not been on the bus all session.
+Rollback: git revert <this sha>.

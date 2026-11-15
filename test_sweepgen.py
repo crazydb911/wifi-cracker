@@ -1,3 +1,4 @@
+import re
 import time
 
 SRC = '/Users/tongbao/wifi_cracker/mac_wifi_app_v2.py'
@@ -105,7 +106,7 @@ chk('txpower written at most once per session (ping-pong off)', s1.count('set tx
     '(got %d)' % s1.count('set txpower'))
 chk('rejected 5G back-off write removed', 'set txpower fixed 1000' not in s1)
 chk('converters wrapped in timeout so a hang cannot eat the ssh budget',
-    s1.count('timeout 20 hcxpcapngtool') == 2, '(got %d)' % s1.count('timeout 20 hcxpcapngtool'))
+    s1.count('timeout 15 hcxpcapngtool') == 2, '(got %d)' % s1.count('timeout 20 hcxpcapngtool'))
 
 print('=== steady round (map-driven) ===')
 s2, t2 = ns['gen'](T(dict(oldmap), True))
@@ -177,6 +178,21 @@ CAP2 = ('hcxdumptool -i wlan0', 'tcpdump -i wlan0')
 chk('steady round also flushes per channel',
       s2.count('echo SWEEPCH') == len([i for i in range(len(s2))
                                        if s2.startswith(CAP2, i)]))
+
+print('=== converter write path == read-back path (the /g/tmp defect) ===')
+# hcxpcapngtool wrote /g/tmp/X.22000 while the app cat-ed /tmp/X.22000, and
+# nothing in the tree ever created /g. Proven in the guest: "ls: /g: No such
+# file or directory". The failure went to a swallowed stderr, so every path
+# silently harvested zero hashes. Pairing is checked, not assumed.
+bad = []
+for m in re.finditer(r'-o (\S+?\.22000)', s1):
+    w = m.group(1)
+    if not s1.count('cat ' + w):
+        bad.append(('no_cat', w))
+    if '/g/' in w:
+        bad.append(('g_dir', w))
+chk('every converter output is read back from the same path', not bad, str(bad))
+chk('no path depends on a directory nothing creates', '/g/tmp' not in s1)
 
 print('=== static: interface reset is opt-in only ===')
 chk('IF_RESET default is opt-in file', "IF_RESET = os.path.exists" in src)
