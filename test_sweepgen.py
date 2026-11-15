@@ -232,8 +232,8 @@ chk('no guest call uses sh -c', not _ssh_sh_c(src),
 # The capture pull is the only reason conversion can be deferred out of the
 # harvest window, so it has to be asserted to exist for both capture paths,
 # not just the one that was tested when it was written.
-chk('both capture paths are pulled out of the guest',
-    "'cold')" in src and "'sweep')" in src
+chk('both the cold path and a catch-all rescue pull from the guest',
+    "'cold')" in src and "'rescue')" in src
     and src.count('_pull_guest_caps(') >= 3,
     'pulls=%d' % src.count('_pull_guest_caps('))
 print('=== static: interface reset is opt-in only ===')

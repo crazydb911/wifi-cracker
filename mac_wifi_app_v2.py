@@ -1728,7 +1728,7 @@ class App:
         # sw5_*/sw_*.pcap (tcpdump, passive) and never fetched either. They
         # are different captures of the same airtime, so both are worth
         # keeping; the capstore cap and the backup loop bound the cost.
-        self._pull_guest_caps('/newroot/tmp/sw*.pcap*', 'sweep')
+        self._pull_guest_caps('/newroot/tmp/*.pcap*', 'rescue')
         # Cold-path survival, in the tool's own terms rather than inferred.
         # rcascan's help defines the reading: no PROBERESPONSE means injection
         # is broken. Saying which of the two happened, in the round it
@@ -2114,8 +2114,15 @@ IFR +
                 capture_output=True, timeout=30)
             paths = [x.strip() for x in
                      (r.stdout or b'').decode('utf8', 'replace').split('\n')
-                     if x.strip().endswith(('.pcapng', '.pcapng_1',
-                                      '.pcap', '.pcap_1', '.pcapng_2'))]
+                     # hcxdumptool rotates by appending a suffix to the base
+                     # name, and the suffix format is not stable across
+                     # versions: this build writes sw5_0.pcapng-00 through
+                     # -12, not the _1 an endswith list would expect. A
+                     # fixed suffix list silently dropped every rotated
+                     # file, which is most of the data, since a rotation
+                     # exists precisely because the base file filled up.
+                     # Anything naming itself as a capture is a capture.
+                     if '.pcap' in x.strip()]
             got = 0
             for p in paths:
                 c = subprocess.run(VM_SSH.split() + ['cat', p],
