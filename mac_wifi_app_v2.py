@@ -897,14 +897,39 @@ class App:
             cold = [rest[(off + i) % len(rest)] for i in range(half)]
             warm, mode = hot, 'focused'
 
+        # One tcpdump for the whole sweep, not one per channel.
+        #
+        # The guest kernel log settles the question with a mechanism instead
+        # of a timeline: rt2800usb_tx_sta_fifo_read_completed reports
+        # "TX status read failed -71" (-EPROTO) starting at t=101.3s, then
+        # every 5.0s forever (95 gaps, all exactly 5.0s, max_gap 5.0s) until
+        # the log ends at t=576s. The TX status endpoint is stalled and the
+        # driver's 5s retry never gets an answer - the transmit path is dead.
+        # That is also why the capture yields no EAPOL: a deauth or a probe
+        # request has to leave the radio, and after t=101s nothing does.
+        #
+        # What precedes it is promiscuous-mode churn: 122 toggles, median
+        # interval 2.5s, and 107 of them after the first -71. Both failures in
+        # this log follow churn by ~30-40s (toggles from t=16s -> disconnect at
+        # t=46s; re-enumeration at t=60s, toggling resumes -> TX dead at
+        # t=101s). Every per-channel tcpdump start/stop is exactly one
+        # enter/leave pair, so a 22-channel sweep was 44 pairs per round.
+        #
+        # In monitor mode the channel lives in each packet's radiotap header,
+        # so separate per-channel files were never needed. One tcpdump appends
+        # to one file and MARK lines are appended between retunes, which keeps
+        # the interleaving _parse_scan already expects. 44 pairs -> 2.
+        SCANF_IN = '/tmp/scan_all.txt'
+        SCANF_OUT = ('/newroot/tmp/scan_all.txt' if RUNNER_MODE
+                     else '/tmp/scan_all.txt')
+
         def sweep(chs, dwell):
             body = ''
             for c in chs:
                 body += (CH + '  /usr/sbin/iw dev wlan0 set channel %d '
                          '2>/dev/null\n' % c +
-                         '  echo "MARK:%d"\n' % c +
-                         CH + '  timeout %s /usr/bin/tcpdump -i wlan0 -e -n '
-                         '2>/dev/null\n' % dwell)
+                         '  echo "MARK:%d" >> %s\n' % (c, SCANF_OUT) +
+                         '  sleep %s\n' % dwell)
             return body
 
         est = len(warm) * 2.5 + len(cold) * 1.2
@@ -915,8 +940,19 @@ class App:
         script = (BIND +
                   IFR +
                   CH + 'iw reg set TW 2>/dev/null\nsleep 1\n' +
+                  # Clear any leaked capture from a previous round, then start
+                  # the single reader. -l keeps it line-buffered so MARK lines
+                  # land between packets in the right order.
+                  'pkill -f "tcpdump -i wlan0" 2>/dev/null; sleep 1\n'
+                  ': > %s\n' % SCANF_OUT +
+                  CH + '/usr/bin/tcpdump -i wlan0 -e -n -l >> %s '
+                  '2>/dev/null &\n' % SCANF_IN +
+                  'sleep 1\n' +
                   sweep(warm, '2.5') +
-                  (sweep(cold, '1.2') if cold else ''))
+                  (sweep(cold, '1.2') if cold else '') +
+                  'pkill -f "tcpdump -i wlan0" 2>/dev/null\n'
+                  'sleep 1\n'
+                  'cat %s\n' % SCANF_OUT);
         try:
             with self._cap_lock:
                 r = subprocess.run(VM_SSH.split() + ['sh', '-s'], input=script.encode(),
