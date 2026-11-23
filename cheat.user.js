@@ -2,8 +2,8 @@
 // @name         天堂倖存者外掛（無敵/真增傷/削血/倍速）
 // @namespace    l1stw-cheat
 // @version      11.90
-// @downloadURL  https://raw.githubusercontent.com/crazydb911/wifi-cracker/main/l1stw/cheat.user.js
-// @updateURL    https://raw.githubusercontent.com/crazydb911/wifi-cracker/main/l1stw/cheat.user.js
+// @downloadURL  https://raw.githubusercontent.com/crazydb911/wifi-cracker/cheat/cheat.user.js
+// @updateURL    https://raw.githubusercontent.com/crazydb911/wifi-cracker/cheat/cheat.user.js
 // @match        https://l1stw.com/*
 // @match        http://l1stw.com/*
 // @run-at       document-idle
